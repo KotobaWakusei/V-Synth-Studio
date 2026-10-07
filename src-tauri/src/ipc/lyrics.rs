@@ -8,6 +8,10 @@
 //! ⚠️ **错误一律是给人看的一句话**（`Result<_, String>`）：IPC 没有状态码，而每条报错
 //! 都是用户能自己处理的（「缺少歌曲 id」「这个版本网易云不给免费账号下载」）。
 //! `source` 只剩 `netease` 一个值，但回包里**仍然带**它（前端在读这个字段）。
+//!
+//! 下载档位（`lyrics_song` 的 `quality`）与账号信息（`lyrics_account` / `lyrics_renew`）
+//! 的做法参考了 FusionMusicPlayer（<https://github.com/Janson20/FusionMusicPlayer>，
+//! GPL-3.0），出处说明与对应函数见 `crate::lyrics` 的模块头。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,14 +62,13 @@ fn file_name(body: &Value, ext: &str, fallback: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    // 大小写都去：用户在「文件名」里手打的情况比想象中多
-    let mut stem = raw;
-    for suffix in [".lrc", ".LRC", ".srt", ".SRT", ".mp3", ".MP3"] {
-        if let Some(rest) = stem.strip_suffix(suffix) {
-            stem = rest;
-            break;
-        }
-    }
+    // 表里歌词与音频两类都要有：用户在「文件名」里手打 `.flac` 的情况比想象中多，
+    // 漏一个就会存成 `歌.flac.mp3`。比较时不分大小写，省掉 `.MP3` 那种重复项。
+    const KNOWN_EXT: [&str; 9] = ["lrc", "srt", "ass", "txt", "mp3", "flac", "m4a", "aac", "wav"];
+    let stem = match raw.rsplit_once('.') {
+        Some((head, tail)) if KNOWN_EXT.iter().any(|e| e.eq_ignore_ascii_case(tail)) => head,
+        _ => raw,
+    };
     let stem = stem.trim();
     let base = crate::bili::safe_title(if stem.is_empty() { fallback } else { stem });
     format!("{base}.{ext}")
@@ -267,7 +270,12 @@ pub async fn lyrics_cover(st: super::St<'_>, args: Value) -> Cmd {
     }))
 }
 
-/// 直链下载歌曲音频。`{ id, outDir?, name? }` → `{ path, name, size, level, format }`
+/// 直链下载歌曲音频。`{ id, quality?, durationSec?, outDir?, name? }` →
+/// `{ path, name, size, level, format, downgraded }`
+///
+/// `quality` 是档位上限（`auto` / `hires` / `lossless` / `exhigh` / `higher` / `standard`），
+/// 认不出按 `auto`。**响应里的 `level` 是实际拿到的档位** —— 服务端会静默降级
+/// （求无损只给 320 kbps），`downgraded` 说明是否发生了这件事，界面据此如实显示。
 ///
 /// 存到哪和歌词/封面一个规矩：请求里的 `outDir` 优先，否则用配置里的默认输出目录。
 /// 「直链」在 `crate::lyrics::download_song` 里拿：能拿到就下，
@@ -280,26 +288,36 @@ pub async fn lyrics_song(st: super::St<'_>, args: Value) -> Cmd {
     if dir.is_empty() {
         return Err("没有输出目录，请先选择目录".into());
     }
+
+    let quality = crate::lyrics::Quality::parse(
+        args.get("quality").and_then(|v| v.as_str()).unwrap_or(""),
+    );
+    // 曲目时长用来拦「只拿到 30 秒试听片段」；前端拿不到就是 0，此时不判
+    let duration = args
+        .get("durationSec")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
     // 歌名兜底成歌曲 id：前端一般会传「歌名 - 歌手」，传空也不能存成无名文件。
-    // 扩展名先按 mp3 去掉，真实格式由接口回包决定（多半是 mp3，也可能是 m4a），拿到再补。
+    // 扩展名先按 mp3 去掉，真实格式等下载完按**文件头**补。
     let stem = file_name(&args, "mp3", &id);
     let path = PathBuf::from(&dir).join(&stem);
 
     let cfg = st.config_snapshot();
-    let (size, level, format) = crate::lyrics::download_song(&cfg, &id, &path)
+    let got = crate::lyrics::download_song(&cfg, &id, &path, quality, duration)
         .await
-        // 拿不到直链 / 版权受限：这是用户能理解并自己处理的事，原样显示
+        // 拿不到直链 / 版权受限 / 只有试听：这是用户能理解并自己处理的事，原样显示
         .map_err(|e| e.to_string())?;
 
-    // 接口说不是 mp3（如 m4a）：把已写出的文件改名，免得扩展名和内容不符
-    let (path, name) = if format == "mp3" {
+    // 扩展名跟着**实际格式**改（`format` 是按文件头认出来的，比接口的 type 可信）
+    let (path, name) = if got.format == "mp3" {
         (path, stem)
     } else {
-        let renamed = path.with_extension(&format);
+        let renamed = path.with_extension(&got.format);
         let name = renamed
             .file_name()
             .map(|x| x.to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("{stem}.{format}"));
+            .unwrap_or_else(|| format!("{stem}.{}", got.format));
         std::fs::rename(&path, &renamed).map_err(|e| format!("改名失败：{e}"))?;
         (renamed, name)
     };
@@ -307,9 +325,10 @@ pub async fn lyrics_song(st: super::St<'_>, args: Value) -> Cmd {
     Ok(json!({
         "path": path.to_string_lossy(),
         "name": name,
-        "size": size,
-        "level": level,
-        "format": format,
+        "size": got.bytes,
+        "level": got.level,
+        "format": got.format,
+        "downgraded": got.downgraded,
     }))
 }
 
@@ -319,7 +338,8 @@ pub async fn lyrics_song(st: super::St<'_>, args: Value) -> Cmd {
 ///
 /// 和 `save_netease_cookie` 对称 —— 同样走 `save_config` + 内存快照，
 /// 区别只是写进去的是空串。清空后 `cookie_of` 读到的就是空，搜索/取歌词
-/// 自动退回未登录状态，不需要别的地方配合。
+/// 自动退回未登录状态，不需要别的地方配合。有效期一并清掉：
+/// 留着它会让界面显示一个早已不存在的登录态的有效期。
 #[tauri::command]
 pub async fn lyrics_logout(st: super::St<'_>, args: Value) -> Cmd {
     let source = source_of(&args);
@@ -327,6 +347,7 @@ pub async fn lyrics_logout(st: super::St<'_>, args: Value) -> Cmd {
     let mut next = st.config_snapshot();
     if let Some(map) = next.as_object_mut() {
         map.insert("neteaseCookie".into(), json!(""));
+        map.insert("neteaseCookieExpire".into(), json!(0));
     }
     config_file::save_config(&st.inner().writable, &next).map_err(|e| e.to_string())?;
     if let Ok(mut guard) = st.inner().config.lock() {
@@ -336,15 +357,21 @@ pub async fn lyrics_logout(st: super::St<'_>, args: Value) -> Cmd {
     Ok(json!({ "loggedOut": true, "source": source }))
 }
 
-/// 把登录拿到的 Cookie 写进配置并落盘。
+/// 把登录 / 续期拿到的 Cookie 与有效期写进配置并落盘。
 ///
 /// 走的就是 `save_config` + 内存快照，和设置页保存 Cookie 是同一条路 ——
-/// 所以「短信登录完之后能不能取到歌词」这件事只取决于 `crate::lyrics::cookie_of`
-/// 读的 `neteaseCookie`，这里写的正是它。
-fn save_netease_cookie(st: &Arc<super::AppState>, cookie: &str) -> Result<(), String> {
+/// 所以「登录完之后能不能取到歌词」这件事只取决于 `crate::lyrics::cookie_of`
+/// 读的 `neteaseCookie`，这里写的正是它。有效期单独存一个字段，
+/// 供界面显示与自动续期判断（见 `crate::lyrics::should_renew`）。
+fn save_netease_cookie(
+    st: &Arc<super::AppState>,
+    cookie: &str,
+    expires_at: i64,
+) -> Result<(), String> {
     let mut next = st.config_snapshot();
     if let Some(map) = next.as_object_mut() {
         map.insert("neteaseCookie".into(), json!(cookie));
+        map.insert("neteaseCookieExpire".into(), json!(expires_at));
     }
     config_file::save_config(&st.writable, &next).map_err(|e| e.to_string())?;
     if let Ok(mut guard) = st.config.lock() {
@@ -397,10 +424,11 @@ fn sms_error(res: &Value, code: i64) -> String {
     format!("发送验证码失败（网易云返回 code {code}，没有说明）：{raw}")
 }
 
-/// 手机号 + 验证码登录。`{ phone, captcha }` → `{ loggedIn, phone, nickname }`
+/// 手机号 + 验证码登录。`{ phone, captcha }` → `{ loggedIn, phone, nickname, vip, vipDetail, expiresAt }`
 ///
-/// 成功时把 Cookie 写进 `config.neteaseCookie` —— 搜索、取歌词、下封面都读这个字段
-/// （见 `crate::lyrics::cookie_of`），所以保存完立刻就能用。
+/// 成功时把 Cookie 与有效期写进 `config.neteaseCookie` / `config.neteaseCookieExpire` ——
+/// 搜索、取歌词、下封面都读前者（见 `crate::lyrics::cookie_of`），所以保存完立刻就能用；
+/// 后者供界面显示有效期与自动续期判断。
 #[tauri::command]
 pub async fn lyrics_login_cellphone(st: super::St<'_>, args: Value) -> Cmd {
     let phone = phone_of(&args)?;
@@ -415,7 +443,7 @@ pub async fn lyrics_login_cellphone(st: super::St<'_>, args: Value) -> Cmd {
     }
 
     let cfg = st.config_snapshot();
-    let cookie = crate::lyrics::cellphone_login(&cfg, &phone, &captcha)
+    let (cookie, expires_at) = crate::lyrics::cellphone_login(&cfg, &phone, &captcha)
         .await
         // 验证码错误 / 号码没注册 / 接口改了：都要原样让用户看到，别压成一句「登录失败」
         .map_err(|e| e.to_string())?;
@@ -426,12 +454,75 @@ pub async fn lyrics_login_cellphone(st: super::St<'_>, args: Value) -> Cmd {
         ));
     }
 
-    save_netease_cookie(&st, &cookie)?;
+    save_netease_cookie(&st, &cookie, expires_at)?;
 
-    // 顺手拿昵称，登录成功的提示就能写成「已登录为 xxx」；拿不到也不影响登录本身
-    let nickname = crate::lyrics::account_nickname(&st.config_snapshot())
-        .await
-        .unwrap_or_default();
+    // 顺手问一次账号：昵称 + 会员标签，登录成功的提示就能写成「已登录为 xxx」；
+    // 拿不到也不影响登录本身（凭据已经落盘了）
+    let info = crate::lyrics::account_info(&st.config_snapshot()).await;
 
-    Ok(json!({ "loggedIn": true, "phone": phone, "nickname": nickname }))
+    Ok(json!({
+        "loggedIn": true,
+        "phone": phone,
+        "nickname": info.nickname,
+        "vip": info.vip,
+        "vipDetail": info.vip_detail,
+        "expiresAt": expires_at,
+    }))
+}
+
+/// 查登录态与账号信息。`{}` →
+/// `{ state, nickname, vip, vipDetail, expiresAt, renewBeforeDays }`
+///
+/// `state` 四态，**前端必须按它区分处理**：
+///   * `ok`       —— 凭据有效
+///   * `expired`  —— 服务端明确说凭据不行了：置为未登录并引导重新登录
+///   * `offline`  —— 网络不通 / 风控：**绝不能因此清掉本地的登录态**
+///   * `anonymous`—— 本地根本没配 Cookie
+///
+/// `expiresAt` 是服务端给的 MUSIC_U 过期时间（unix 秒，0 表示没记过）；
+/// `shouldRenew` 由后端按 `renewBeforeDays` 算好（「现在几点」只在一处取，
+/// 免得前后端各算一遍还对不上），前端据此决定要不要调 `lyrics_renew`。
+#[tauri::command]
+pub async fn lyrics_account(st: super::St<'_>, _args: Value) -> Cmd {
+    let cfg = st.config_snapshot();
+    let info = crate::lyrics::account_info(&cfg).await;
+    let expires_at = cfg
+        .get("neteaseCookieExpire")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    Ok(json!({
+        "state": info.state,
+        "nickname": info.nickname,
+        "vip": info.vip,
+        "vipDetail": info.vip_detail,
+        "expiresAt": expires_at,
+        "renewBeforeDays": crate::lyrics::RENEW_BEFORE_DAYS,
+        "shouldRenew": crate::lyrics::should_renew(
+            expires_at,
+            crate::lyrics::now_unix(),
+            crate::lyrics::RENEW_BEFORE_DAYS,
+        ),
+    }))
+}
+
+/// 手动续期网易云登录凭据。`{}` → `{ renewed, nickname, vip, expiresAt }`
+///
+/// 续期是**换发**：服务端用 `Set-Cookie` 给一个新的 MUSIC_U，旧的也还有效 ——
+/// 所以续期失败**不会导致掉登录**，前端按「这次没续上」处理即可，不必清登录态。
+#[tauri::command]
+pub async fn lyrics_renew(st: super::St<'_>, _args: Value) -> Cmd {
+    let cfg = st.config_snapshot();
+    let Some((cookie, expires_at)) = crate::lyrics::refresh_login(&cfg).await else {
+        return Err("续期没有成功：可能是网络不通，也可能需要重新登录".into());
+    };
+    save_netease_cookie(&st, &cookie, expires_at)?;
+
+    let info = crate::lyrics::account_info(&st.config_snapshot()).await;
+    Ok(json!({
+        "renewed": true,
+        "nickname": info.nickname,
+        "vip": info.vip,
+        "expiresAt": expires_at,
+    }))
 }

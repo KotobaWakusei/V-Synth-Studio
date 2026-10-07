@@ -193,6 +193,31 @@ QQ 侧用 `search_for_qq_cp`（搜索）与 `fcg_query_lyric_new.fcg`（歌词�
 
 ---
 
+## FusionMusicPlayer（歌曲下载与网易云账号部分，GPL-3.0）
+
+<https://github.com/Janson20/FusionMusicPlayer> —— **GPL-3.0**（Copyright (c) Janson20）。
+
+本工作站「歌词」页的**下载音质**与**网易云账号**这两块参考了它的做法，
+代码按本仓的接口与结构自行编写，**未拷贝其代码**（与本程序同为 GPL-3.0，无许可冲突）：
+
+| 参考内容 | 位置 | 来源（上游） |
+| --- | --- | --- |
+| 下载档位（128K / 320K / 无损 / Hi-Res / 自动）与逐档向下的回退链 | `src-tauri/src/lyrics.rs` | `app/core/resolver.py` 的降级链 |
+| 静默降级的识别：非会员求无损拿到 `level=exhigh` 时不算成功 | 同上 | 同上 |
+| 落盘前的文件头 + 时长双重校验、`<文件名>.part` 临时文件 | 同上 | `app/core/resolver.py` |
+| 会员标签按客户端写法带等级（「黑胶SVIP·肆」，等级超出 1..99 时退回阿拉伯数字） | 同上 | `app/core/account.py` |
+| 凭据有效期（服务端 `MUSIC_U` 的 Max-Age 约 180 天）与临近过期自动续期（`/api/login/token/refresh`） | 同上 | 同上 |
+| 登录态划分：服务端确认失效才置为未登录，网络故障不动登录态 | 同上 | 同上 |
+
+**未参考、按实测接口自行实现的部分**：全部端点选择与请求参数形状、
+`vipType` 两种编码（标量 / 位掩码）的判定、文件头魔术字节的解析。
+上游是 PySide6 + FluentUI QML 的 Python 实现，本项目是 Rust + Tauri，
+两边没有共享代码，也不链接。
+
+界面上的登记见「歌词」页页脚的「许可与出处」，与设置页的第三方组件许可总表同源。
+
+---
+
 ## JIZURA（文字 PV 编辑器）
 
 - 出处：<https://github.com/852wa/JIZURA>　Copyright (c) 2026 hakoniwa

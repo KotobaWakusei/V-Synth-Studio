@@ -384,17 +384,66 @@ export const api = {
         call<{ path: string; name: string; format: string; size: number }>('lyrics_save', {args: payload}),
     lyricsCover: (payload: { url: string; outDir: string; name?: string }) =>
         call<{ path: string; name?: string; size?: number }>('lyrics_cover', {args: payload}),
-    /* 歌曲直链下载的回包是 `{ path, name, size, level, format }`。
+    /* 歌曲直链下载的回包是 `{ path, name, size, level, format, downgraded }`。
        ⚠️ 拿不到直链时后端**抛一句给用户看的中文**（版权受限 / 只有会员能听），
-       页面直接 `toast(e.message)`，不要再包一层「下载失败」。 */
-    lyricsSong: (payload: { id: string | number; outDir: string; name?: string }) =>
-        call<{ path: string; name: string; size: number; level: string; format: string }>('lyrics_song', {
-            args: payload,
-        }),
+       页面直接 `toast(e.message)`，不要再包一层「下载失败」。
+
+       下载档位与网易云登录态这两组的做法参考了 FusionMusicPlayer
+       （https://github.com/Janson20/FusionMusicPlayer，GPL-3.0），未拷贝其代码。 */
+    /**
+     * 下载歌曲音频。
+     *
+     * `quality` 是档位上限（`auto` / `hires` / `lossless` / `exhigh` / `higher` / `standard`）。
+     * 回包里的 `level` 是**实际**拿到的档位 —— 服务端会静默降级（求无损只给 320 kbps），
+     * `downgraded` 说明是否发生了这件事，提示里要如实写明。
+     * `durationSec` 用来拦「只拿到 30 秒试听片段」，拿不到就不传（后端此时不判）。
+     */
+    lyricsSong: (payload: {
+        id: string | number
+        outDir: string
+        name?: string
+        quality?: string
+        durationSec?: number
+    }) =>
+        call<{
+            path: string
+            name: string
+            size: number
+            level: string
+            format: string
+            downgraded: boolean
+        }>('lyrics_song', {args: payload}),
     lyricsSms: (phone: string) => call<{ ok?: boolean }>('lyrics_login_sms', {args: {phone}}),
     lyricsCellphone: (phone: string, captcha: string) =>
-        call<{ loggedIn: boolean; phone: string; nickname: string }>('lyrics_login_cellphone', {
-            args: {phone, captcha},
+        call<{
+            loggedIn: boolean
+            phone: string
+            nickname: string
+            vip: string
+            vipDetail: string
+            expiresAt: number
+        }>('lyrics_login_cellphone', {args: {phone, captcha}}),
+    /**
+     * 查登录态与账号信息。
+     *
+     * `state` 必须分开处理：`expired` 是服务端说凭据不行了（置为未登录并引导重新登录），
+     * `offline` 只是网络不通，**绝不能因此清掉本地的登录态**。
+     */
+    lyricsAccount: () =>
+        call<{
+            state: 'ok' | 'expired' | 'offline' | 'anonymous'
+            nickname: string
+            vip: string
+            vipDetail: string
+            expiresAt: number
+            renewBeforeDays: number
+            /** 后端按 renewBeforeDays 算好的（现在几点只在一处取），前端据此决定要不要续期 */
+            shouldRenew: boolean
+        }>('lyrics_account', {args: {}}),
+    /** 手动续期。续期是换发（旧的也还有效），所以失败不代表掉登录 */
+    lyricsRenew: () =>
+        call<{ renewed: boolean; nickname: string; vip: string; expiresAt: number }>('lyrics_renew', {
+            args: {},
         }),
     lyricsLogout: (source: LyricsSource) => call<Record<string, unknown>>('lyrics_logout', {args: {source}}),
 

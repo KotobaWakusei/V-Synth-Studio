@@ -513,6 +513,13 @@ const LICENSES: { feature: string; upstream: string; href?: string; license: str
         how: '歌词文本的处理规则（多写法时间戳、LRC 转 SRT、译文对齐）移植自它',
     },
     {
+        feature: '歌曲下载 / 网易云账号',
+        upstream: 'FusionMusicPlayer',
+        href: 'https://github.com/Janson20/FusionMusicPlayer',
+        license: 'GPL-3.0',
+        how: '下载档位与回退链、静默降级的识别、落盘前校验、会员标签与凭据续期参考自它（照做法自行实现，未拷贝其代码）',
+    },
+    {
         feature: '文字 PV（编辑器）',
         // ⚠️ 与 `tools/assets.mjs` 的 `UPSTREAM_JIZURA_VERSION` 保持一致（MIT 要求署名）。
         // 两处无法共享常量，由 `tools/check_assets_agree.mjs` 核对，升级时一起改。
