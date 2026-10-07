@@ -322,6 +322,10 @@ pub async fn convert_run(st: super::St<'_>, args: Value) -> Cmd {
         let mut fail_count = 0usize;
 
         for (i, input) in inputs.iter().enumerate() {
+            if job_is_canceled(&st2, &job_id2) {
+                break;
+            }
+
             let base = ((i as f64 / total as f64) * 100.0) as u32;
             let file_name = Path::new(input)
                 .file_name()
@@ -370,6 +374,10 @@ pub async fn convert_run(st: super::St<'_>, args: Value) -> Cmd {
                 crate::libresvip::convert(&root, &inp, &outp, &opts)
             })
             .await;
+
+            if job_is_canceled(&st2, &job_id2) {
+                break;
+            }
 
             match result {
                 Ok(Ok(r)) if r.ok => {
@@ -421,14 +429,30 @@ pub async fn convert_run(st: super::St<'_>, args: Value) -> Cmd {
             }
         }
 
-        finish_job(
-            &st2,
-            &job_id2,
-            &format!("完成：成功 {ok_count} / 失败 {fail_count}"),
-        );
+        if !job_is_canceled(&st2, &job_id2) {
+            finish_job(
+                &st2,
+                &job_id2,
+                &format!("完成：成功 {ok_count} / 失败 {fail_count}"),
+            );
+        }
     });
 
     Ok(json!({ "jobId": job_id }))
+}
+
+/// Check whether a background conversion job has been canceled.
+fn job_is_canceled(st: &Arc<super::AppState>, id: &str) -> bool {
+    st.jobs
+        .lock()
+        .ok()
+        .and_then(|guard| guard.items.get(id).cloned())
+        .and_then(|job| {
+            job.get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "canceled")
+        })
+        .unwrap_or(false)
 }
 
 /// Reserve an output name so concurrent conversion jobs cannot choose the same path.
