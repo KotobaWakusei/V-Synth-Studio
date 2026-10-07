@@ -1,7 +1,7 @@
 /**
  * 后端调用 —— **每个方法就是一条 Tauri IPC 命令**。
  *
- * 后端命令只走 `call('命令名', args)`（实现见 `lib/ipc.ts`）。75 条命令的唯一登记处
+ * 后端命令只走 `call('命令名', args)`（实现见 `lib/ipc.ts`）。77 条命令的唯一登记处
  * 是 `src-tauri/src/lib.rs` 的 `generate_handler!`。
  *
  * ⚠️ **没有 `{ok:true}` 信封。** 成功就是业务对象本身，失败是后端抛出来的一句

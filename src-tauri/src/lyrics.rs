@@ -70,7 +70,7 @@ fn client(cfg: &Value) -> Result<reqwest::Client, String> {
 ///   含糊的 `error decoding response body`。总超时放宽后仍怕「连上了但不发数据」，
 ///   所以留 60 秒读超时。
 ///
-/// 前端给这个接口的超时也是 5 分钟（`api.ts` 的 `lyricsSong`）。
+/// 前端对这条命令没有超时（`lib/ipc.ts` 约定 3），兜底就是上面这两个值。
 fn media_client(cfg: &Value) -> Result<reqwest::Client, String> {
     let mut builder = base_builder(cfg, 600)?;
     // 60 秒没收到新数据才判死；数据一直在流就不会超时
@@ -1022,7 +1022,7 @@ fn vip_label(vip_type: i64, level: i64) -> String {
 
 /// 登录态查询结果。
 ///
-/// `state` 是三态，**必须把「凭据失效」和「网络不通」分开**：前者要把界面置为未登录并
+/// `state` 是四态，**必须把「凭据失效」和「网络不通」分开**：前者要把界面置为未登录并
 /// 引导重新登录，后者绝不能因此清掉本地的登录态。
 pub struct AccountInfo {
     /// `ok` / `expired` / `offline` / `anonymous`（本地根本没配 Cookie）
