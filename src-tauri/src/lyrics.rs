@@ -2243,7 +2243,7 @@ mod tests {
     fn part_path_keeps_the_original_extension() {
         // `.part` 必须追加在原名之后：with_extension("part") 会把 .mp3 顶掉，
         // 校验通过后改回原名就对不上了
-        let p = part_path(Path::new(r"D:\out\歌.mp3"));
+        let p = part_path(&Path::new("out").join("歌.mp3"));
         // ⚠️ extension() 看到的是**最后**一段，所以这里是 part；原扩展名留在 file_stem
         // 里（`歌.mp3`）—— 这正是「追加」而非「替换」的意义，改回原名才对得上
         assert_eq!(p.extension().and_then(|x| x.to_str()), Some("part"));
