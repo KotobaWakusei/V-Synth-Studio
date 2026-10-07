@@ -62,6 +62,7 @@ pub fn default_config() -> Value {
         "downloadDir": "",
         "bilibiliCookie": "",
         "neteaseCookie": "",
+        "neteaseCookieExpire": 0,
         "proxy": "",
         /* ── 下面这几项后端不读，但**必须在这儿列出来** ──────────────────────
          *
