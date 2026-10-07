@@ -20,6 +20,8 @@ mod midi_transcribe;
 mod net;
 mod platform;
 mod svsep;
+mod update;
+mod upgrade;
 mod wallpaper;
 
 /// 追加一行日志到 `<可写目录>/app.log`。
@@ -132,6 +134,14 @@ pub fn run() {
             // 不预热的话，前端首屏那次 `get_state` 就要干等这几秒（用户看到的是白屏）。
             std::thread::spawn(move || {
                 let _ = state.probe_cached(false);
+                /* 升级清理（见 `crate::upgrade`）：扫几个顶层目录、删自己的临时文件，
+                   毫秒级，但**不能放在 setup 里同步做** —— 那是主线程，而这几条路径
+                   可能在机械盘或网络盘上，慢起来就是「启动时窗口不出现」。 */
+                let _ = crate::upgrade::cleanup(
+                    &state.writable,
+                    &crate::artifact::ext_of(&state.writable),
+                    state.previous_ext_dir.as_deref(),
+                );
             });
 
             /* 窗口在 `tauri.conf.json` 里是 `visible: false`，由前端 `main.tsx`
@@ -227,8 +237,9 @@ pub fn run() {
             ipc::svsep::svsep_stop,
             ipc::svsep::svsep_models_download,
             ipc::svsep::svsep_runtime_download,
-            ipc::svsep::svsep_runtime_dir,
-            ipc::svsep::svsep_set_runtime_dir,
+            /* ── 扩展包目录（音轨分离与人声转 MIDI 共用同一个根）── */
+            ipc::svsep::ext_dir_get,
+            ipc::svsep::ext_dir_set,
             ipc::svsep::svsep_dml_download,
             ipc::svsep::svsep_download_pause,
             ipc::svsep::svsep_download_stop,
@@ -251,6 +262,8 @@ pub fn run() {
             ipc::midi::midi_task,
             ipc::midi::midi_cancel,
             ipc::midi::midi_open_output,
+            /* ── 检查更新 ── */
+            ipc::update::update_check,
         ])
         .build(tauri::generate_context!())
         .expect("Tauri 应用构建失败")

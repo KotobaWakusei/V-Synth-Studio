@@ -529,12 +529,14 @@ fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
 // 路径
 // ---------------------------------------------------------------------------
 
-/// 动态库与模型的家：`<可写目录>/midi/`。
+/// 动态库与模型的散件目录：`<扩展包根>/midi/`（`midi_settings.json`、任务临时目录）。
 ///
-/// 和音轨分离的 `<可写>/svsep/` 同一个道理 —— 绿色版落在 `data/`，
-/// 安装版落在 `%APPDATA%`，随包内容只读、下下来的东西可写。
+/// 和音轨分离的 `<扩展包根>/svsep/` 同一个道理 —— 用户可以把整个扩展包目录指定到
+/// 别的盘，所以这里一律经由 `artifact::ext_of` 拿那个根，别自己拼可写目录。
+/// ⚠️ GAME **模型**不在这儿，它在 `<扩展包根>/game/models`（见 `artifact` 表里
+/// `game.models` 那条）：一个目录放两样东西，删依赖时就分不出该删哪个。
 pub fn data_dir(writable: &Path) -> PathBuf {
-    writable.join("midi")
+    crate::artifact::ext_of(writable).join("midi")
 }
 
 /// ONNX Runtime 动态库 —— 候选来自 `artifact` 表的 `midi.ort`，一个都不在就是 `None`。
@@ -599,7 +601,7 @@ pub fn status(root: &Path, writable: &Path) -> Value {
     ⛔ 别在前端按 `dir` 的**尾巴**猜：三种情况的路径都以 `\game\models` 结尾。 */
     /* ⚠️ 两层候选与「当前用哪一层」都问表（`game.models` 的 `places`）——
     这里只需要那个「随包层」与「当前生效层」做比较。 */
-    let ctx = crate::artifact::Ctx::with_svsep(root, writable, Path::new(""));
+    let ctx = crate::artifact::Ctx::new(root, writable);
     let a = crate::artifact::get("game.models").expect("表里必须有 game.models");
     let dirs = crate::artifact::candidates(&ctx, a);
     let bundled = dirs[1].clone();
@@ -697,18 +699,17 @@ pub async fn download_models(
         &|got, total, stage| on_progress(got, total, stage),
     )
     .await?;
-    /* 落到**可写那一层的 `game/models`**。
+    /* 落到**扩展包根下的 `game/models`**。
     ⚠️ 不要图省事写 `data_dir(writable)`（那是 `midi/`）：下载能成功、解包能成功，
     唯独 `artifact::dir_of(root, writable, "game.models")` 找不到它 —— 用户点「开始扒谱」时才报
     「模型还没装全」，而状态页明明显示已就绪。
-    ⚠️ 也**不要**手写 `writable.join("game").join("models")`：那是把落点知识
+    ⚠️ 也**不要**手写 `ext.join("game").join("models")`：那是把落点知识
     又抄了一遍。落点由 `artifact::download_dest` 给出（= 表里 `game.models`
     的第一个候选），下载与判据于是永远对得上。 */
-    /* 这个函数只拿到 `writable`、拿不到 `root`，而落点是 `game.models`
-    的**第一个候选**（`Base::Writable` 那一层）—— 与 `root` 无关。
-    所以把 `writable` 同时当 root 传进来只影响我们**不查**的那一层。
-    `download_dest` 永远返回第一候选，正是要落的地方。 */
-    let ctx = crate::artifact::Ctx::with_svsep(writable, writable, Path::new(""));
+    /* 这个函数只拿到 `writable`，而落点是 `game.models` 的**第一个候选**
+    （`Base::Ext` 那一层）—— 它由 `writable` 与 `config.json` 的 `extDir` 一起决定，
+    问 `Ctx::new` 就是那条唯一的判据。`root` 那一层这里不查。 */
+    let ctx = crate::artifact::Ctx::new(writable, writable);
     let dest = crate::artifact::download_dest(
         &ctx,
         crate::artifact::get("game.models").expect("表里必须有 game.models"),
@@ -741,21 +742,22 @@ pub async fn download_models(
 ///
 /// 返回 `(文件数, 字节数, 说明)`，说明是**给界面直接显示的中文**。
 ///
-/// # ⚠️ 必须同时删 `<可写>/game/models`
+/// # ⚠️ 必须同时删 `<扩展包根>/game/models`
 ///
-/// `data_dir(writable)`（= `<可写>/midi/`）里**只有**任务临时目录与 `.part` 残留；
-/// 模型落在 `<可写>/game/models/`（见 `download_models`）。
+/// `data_dir(writable)`（= `<扩展包根>/midi/`）里**只有**任务临时目录与 `.part` 残留；
+/// 模型落在 `<扩展包根>/game/models/`（见 `download_models`）。
 /// 只清前者的话：用户点「删除依赖」，347 MB 的模型一个字节没少，
 /// `status` 照样回 `models.ready = true`，**下载按钮再也不出现**。
 ///
 /// # ⚠️ 删完还要回头看一眼盘上的真状态
 ///
-/// `artifact::dirs_of(root, writable, "game.models")` 是两层：可写的
-/// `<可写>/game/models` 与随包只读的
-/// `<root>/data/game/models`，谁先齐用谁。**绿色版这两层是同一个路径**
-/// （`writable == <root>/data`），所以把模型放进那一层之后，删掉 = 引擎回落到
-/// 「随包自带」= 状态仍然「就绪」。这不是 bug（本就该能跑），但**对用户完全说不通**：
-/// 点了删除、按钮没出来、也看不出为什么。所以这里把真实原因查出来，交给界面写清楚：
+/// `artifact::dirs_of(root, writable, "game.models")` 是两层：扩展包根下的
+/// `game/models` 与随包只读的
+/// `<root>/data/game/models`，谁先齐用谁。**绿色版这两层可能是同一个路径**
+/// （`extDir` 没配置时扩展包根就是 `<root>/data`），所以把模型放进那一层之后，
+/// 删掉 = 引擎回落到「随包自带」= 状态仍然「就绪」。这不是 bug（本就该能跑），
+/// 但**对用户完全说不通**：点了删除、按钮没出来、也看不出为什么。
+/// 所以这里把真实原因查出来，交给界面写清楚：
 /// 是「随包自带的那份留着」，还是「下下来那份已删、按钮马上就出来」。
 pub fn delete_deps(root: &Path, writable: &Path) -> (u64, u64, String) {
     fn rm_tree(p: &Path, files: &mut u64, bytes: &mut u64) {
@@ -788,7 +790,7 @@ pub fn delete_deps(root: &Path, writable: &Path) -> (u64, u64, String) {
         }
     }
 
-    // ② 下下来的模型。⚠️ 只删**可写那一层**，随包只读的那层一律不碰
+    // ② 下下来的模型。⚠️ 只删**扩展包根那一层**，随包只读的那层一律不碰
     //    （那是安装内容，删了就是把程序拆坏 —— 何况安装版下它根本不可写）
     let dirs = crate::artifact::dirs_of(root, writable, "game.models");
     let downloaded = dirs[0].clone();
@@ -796,10 +798,10 @@ pub fn delete_deps(root: &Path, writable: &Path) -> (u64, u64, String) {
     rm_tree(&downloaded, &mut files, &mut bytes);
 
     /* ⚠️ 这段判断必须**在删完之后**做（`models_dir` 是拿盘上真状态算的）。
-    ⚠️ `bundled == downloaded` 那一条**必须先判**：绿色版两层同路径（`status` 里报
-    `origin = "local"`），删掉就是真删掉了、引擎没有第二层可回落，状态随即变成
+    ⚠️ `bundled == downloaded` 那一条**必须先判**：两层同路径时（`status` 里报
+    `origin = "local"`）删掉就是真删掉了、引擎没有第二层可回落，状态随即变成
     「缺 3 个」—— 那时还说「引擎会接着用随包那份」是**错话**。
-    只有安装版（两层是两个目录）才可能出现「删完仍就绪」这件事。 */
+    只有两层真是两个目录时才可能出现「删完仍就绪」这件事。 */
     let note = if bundled == downloaded {
         String::new()
     } else if crate::artifact::ready_of(root, writable, "game.models") {
@@ -1295,6 +1297,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("root");
         let writable = base.join("writable");
+        /* ⚠️ 扩展包根是**进程级**的，别的单测可能已经把它指到别处；这一条要的是
+           「根 = 可写目录」这个默认形态，所以显式钉一次。 */
+        crate::artifact::init_ext_base("");
 
         // ① 用户自己放的那份：官方 CPU 包，落在 `<可写>/midi/`（候选里的第一个）
         let cpu = data_dir(&writable).join(crate::tools::dll("onnxruntime"));
@@ -1302,7 +1307,7 @@ mod tests {
         std::fs::write(&cpu, b"x").unwrap();
 
         // ② 音轨分离运行时里那份：GPU 构建 —— 旁边躺着 CUDA provider
-        let capi = crate::svsep::runtime_base(&root)
+        let capi = crate::svsep::runtime_base(&writable)
             .join("runtime")
             .join("Lib")
             .join("site-packages")

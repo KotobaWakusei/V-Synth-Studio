@@ -89,6 +89,9 @@ jobs:
       # 仓库与 workflow 自身对不对得上 —— 这类漂移在本地跑不到（YAML 读不到 JS 常量），
       # 只会在 CI 里炸，而那时每轮要等十几分钟。放在前面，早失败。
       # 两个检查只用 Node 内建模块，所以放在 `pnpm install` 之前也行。
+      #
+      # 最后那条是**跑脚本**而不是查表：壁纸宿主页的 `boot` 在重启时常常早于父窗口的
+      # 监听器，所以它必须能被再问一次。坏掉的表现是「重启后背景不动」，编译期看不出来。
       - name: 核对仓库与 workflow 一致
         shell: pwsh
         run: |
@@ -97,6 +100,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "check-artifact-paths.mjs 失败" }
           node tools/check_assets_agree.mjs
           if ($LASTEXITCODE -ne 0) { throw "check_assets_agree.mjs 失败" }
+          node tools/check_wallpaper_handshake.mjs
+          if ($LASTEXITCODE -ne 0) { throw "check_wallpaper_handshake.mjs 失败" }
 
       - name: 装前端依赖
         shell: pwsh
@@ -162,6 +167,13 @@ jobs:
           path: src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error      # 没打出 MSI 却"成功"，比失败更糟
 
+      - name: 传 exe 安装程序（build artifact）
+        uses: actions/upload-artifact@v7
+        with:
+          name: v-synth-studio-setup
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
       # 让「编出来的东西真的能装、装出来是对的」有个证据，而不是只看编译退出码。
       #
       # jizura 的文件在盘上（Vite 要把它拷进 `dist/`），但它**不在** `bundle.resources`
@@ -182,6 +194,15 @@ jobs:
           if ($msi.Count -ne 1) { throw "期望恰好一个 MSI，实际 $($msi.Count) 个" }
           $msi = $msi[0].FullName
           Write-Host ("MSI: {0}   {1:N1} MB（压缩后）" -f $msi, ((Get-Item $msi).Length / 1MB))
+
+          # exe 安装程序：与 MSI 同一个程序的另一种装法，也一起传 Release。
+          # 只查「恰好一个 + 体积下限」—— 它的内容与 MSI 同源（同一份 exe 打出来的），
+          # 真要逐件核对在 MSI 那边已经做了。
+          $setup = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis/*.exe')
+          if ($setup.Count -ne 1) { throw "期望恰好一个 exe 安装程序，实际 $($setup.Count) 个" }
+          $setupMb = $setup[0].Length / 1MB
+          Write-Host ("exe 安装程序：{0}   {1:N1} MB" -f $setup[0].Name, $setupMb)
+          if ($setupMb -lt 100) { throw "exe 安装程序只有 $([math]::Round($setupMb, 1)) MB，明显少打包了" }
 
           # ⚠️ 两条姿势：SQL 的列名要**反引号**；
           #    InvokeMember 的每个返回值都要 $null = 接住，否则会混进函数输出。
@@ -250,9 +271,12 @@ jobs:
           }
           Write-Host '布局与总量都对 ✓'
 
-      - name: 传 MSI 到 Release
+      - name: 传 MSI 与 exe 安装程序到 Release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release
         uses: softprops/action-gh-release@v3
         with:
-          files: src-tauri/target/release/bundle/msi/*.msi
+          # 两个都传：README 里列的就是两种装法，而以前 exe 得手工往 Release 上补
+          files: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
           generate_release_notes: true

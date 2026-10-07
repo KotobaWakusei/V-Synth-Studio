@@ -62,10 +62,15 @@ jobs:
 
       # 仓库自己的两张表、以及仓库与 workflow 的漂移 —— 这些在本地跑不到（YAML 读不到
       # JS 常量），只会在 CI 里炸，而那时每轮要等十几分钟。放在最前面，早失败。
+      #
+      # 壁纸握手那一条是**跑脚本**、不是查表：宿主页那条 `boot` 在重启时常常早于父窗口的
+      # 监听器，所以它必须能被父窗口再问一次（见 tools/check_wallpaper_handshake.mjs）。
+      # 这条坏掉的表现是「重启后背景不动」，而它在编译期完全看不出来。
       - name: 核对仓库与 workflow 一致
         run: |
           node tools/check-artifact-paths.mjs
           node tools/check_assets_agree.mjs
+          node tools/check_wallpaper_handshake.mjs
 
       - name: 装前端依赖
         run: pnpm install --frozen-lockfile

@@ -1,10 +1,10 @@
 import {useCallback, useEffect, useRef, useState} from 'react'
-import {api} from '@/lib/api'
+import {api, type ExtDirInfo, type UpdateCheck} from '@/lib/api'
 import type {AppState} from '@/lib/types'
 import type {PageProps, ToastFn} from './types'
 import {Button} from '@/components/Button'
 import {Field, TextInput} from '@/components/Field'
-import {Chip, GlassPanel, Panel, PanelHead, Stat} from '@/components/Panel'
+import {Chip, Finding, GlassPanel, Panel, PanelHead, Stat} from '@/components/Panel'
 import {Wallpaper} from '@/components/WallpaperSettings'
 import {Upstream} from '@/components/Credit'
 import {GlassSlider} from '@ttqtt/liquid-glass-react'
@@ -258,52 +258,152 @@ function Paths({
     const [out, setOut] = useState('')
     const [dl, setDl] = useState('')
     const [busy, setBusy] = useState(false)
+    const {t} = useI18n()
+    /* 扩展包目录：音轨分离的运行时 / 模型、人声转 MIDI 的模型都落在这儿（约 8 GB）。
+       ⚠️ 它**不走 `cfg`**（那一份是页面自己拉的配置快照），而是直接问后端的
+       `ext_dir_get` —— 那一条会把「默认位置」与「老位置还留着一份」一并算出来，
+       在前端重算一遍就成了两套判据。 */
+    const [ext, setExt] = useState<ExtDirInfo | null>(null)
 
     useEffect(() => {
         setOut(String(cfg.outputDir ?? state?.paths?.outputDir ?? ''))
         setDl(String(cfg.downloadDir ?? state?.paths?.downloadDir ?? ''))
     }, [cfg.outputDir, cfg.downloadDir, state?.paths?.outputDir, state?.paths?.downloadDir])
 
+    useEffect(() => {
+        void api
+            .extDirGet()
+            .then(setExt)
+            .catch(() => {
+                /* 读不到就不画下面那一块 */
+            })
+    }, [])
+
+    /** 换扩展包目录。`dir` 传空串 = 回到默认（可写目录）。 */
+    const setExtDir = async (dir: string) => {
+        setBusy(true)
+        try {
+            setExt(await api.extDirSet(dir))
+            onToast(dir ? '扩展包目录已改，新下载的包落在这里' : '扩展包目录已恢复默认', 'ok')
+        } catch (e) {
+            onToast(e instanceof Error ? e.message : String(e), 'err')
+        } finally {
+            setBusy(false)
+        }
+    }
+
+    const pickExtDir = async () => {
+        try {
+            const r = await api.fsPick({folder: true, title: '选扩展包的存放位置'})
+            if (!r.files.length) return
+            await setExtDir(r.files[0])
+        } catch (e) {
+            onToast(e instanceof Error ? e.message : String(e), 'err')
+        }
+    }
+
     return (
-        <Panel>
-            <PanelHead title="默认目录" desc="只影响默认值，每次操作时还能单独改"/>
-            <div className="stack">
-                <Field label="默认输出目录（转换结果）">
-                    <TextInput value={out} onChange={(e) => setOut(e.target.value)}/>
-                </Field>
-                <Field label="默认下载目录（视频 / 音频）">
-                    <TextInput value={dl} onChange={(e) => setDl(e.target.value)}/>
-                </Field>
-                <div className="btn-row">
-                    <Button
-                        variant="primary"
-                        loading={busy}
-                        onClick={async () => {
-                            setBusy(true)
-                            try {
-                                await onSave({outputDir: out, downloadDir: dl}, '路径已保存')
-                            } catch {
-                                /* save 已经报过 toast */
-                            } finally {
-                                setBusy(false)
+        <>
+            <Panel>
+                <PanelHead title="默认目录" desc="只影响默认值，每次操作时还能单独改"/>
+                <div className="stack">
+                    <Field label="默认输出目录（转换结果）">
+                        <TextInput value={out} onChange={(e) => setOut(e.target.value)}/>
+                    </Field>
+                    <Field label="默认下载目录（视频 / 音频）">
+                        <TextInput value={dl} onChange={(e) => setDl(e.target.value)}/>
+                    </Field>
+                    <div className="btn-row">
+                        <Button
+                            variant="primary"
+                            loading={busy}
+                            onClick={async () => {
+                                setBusy(true)
+                                try {
+                                    await onSave({outputDir: out, downloadDir: dl}, '路径已保存')
+                                } catch {
+                                    /* save 已经报过 toast */
+                                } finally {
+                                    setBusy(false)
+                                }
+                            }}
+                        >
+                            保存路径设置
+                        </Button>
+                        <Button
+                            onClick={() =>
+                                api.fsReveal(out, false).catch((e: unknown) =>
+                                    onToast(e instanceof Error ? e.message : String(e), 'err'),
+                                )
                             }
-                        }}
-                    >
-                        保存路径设置
-                    </Button>
-                    <Button
-                        onClick={() =>
-                            api.fsReveal(out, false).catch((e: unknown) =>
-                                onToast(e instanceof Error ? e.message : String(e), 'err'),
-                            )
-                        }
-                    >
-                        打开输出目录
-                    </Button>
+                        >
+                            打开输出目录
+                        </Button>
+                    </div>
+                    <p className="hint">程序根目录：{state?.paths?.root ?? '未读取到'}</p>
                 </div>
-                <p className="hint">程序根目录：{state?.paths?.root ?? '未读取到'}</p>
-            </div>
-        </Panel>
+            </Panel>
+
+            {/* ── 扩展包目录 ────────────────────────────────────────────
+          音轨分离的运行时（解压后 7.4 GB）+ 模型 + 人声转 MIDI 的模型合计约 8 GB，
+          默认落在可写目录里 —— 安装版就是 `%APPDATA%`，也就是 C 盘。这一格给
+          「想挪到别的盘」的人一个出口；第一次点「安装扩展包」时还会再问一次
+          （同一个键、同一个实现，见 `lib/extDir.tsx`）。 */}
+            {ext && (
+                <Panel>
+                    <PanelHead
+                        title="扩展包目录"
+                        desc="音轨分离与人声转 MIDI 下载的包都放在这里，合计约 8 GB"
+                        extra={
+                            ext.isDefault
+                                ? <Chip>{t('默认位置')}</Chip>
+                                : <Chip tone="accent">{t('已自定义')}</Chip>
+                        }
+                    />
+                    <div className="stack">
+                        <Field label="当前目录">
+                            <TextInput value={ext.dir} readOnly/>
+                        </Field>
+                        <div className="btn-row">
+                            <Button size="sm" loading={busy} onClick={() => void pickExtDir()}>
+                                换个目录…
+                            </Button>
+                            {!ext.isDefault && (
+                                <Button size="sm" variant="ghost" loading={busy} onClick={() => void setExtDir('')}>
+                                    恢复默认位置
+                                </Button>
+                            )}
+                            <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() =>
+                                    api.fsReveal(ext.dir, false).catch((e: unknown) =>
+                                        onToast(e instanceof Error ? e.message : String(e), 'err'),
+                                    )
+                                }
+                            >
+                                打开目录
+                            </Button>
+                        </div>
+                        {ext.isDefault && (
+                            <p className="hint">
+                                默认位置：{ext.defaultDir}
+                                {ext.installed ? '（在系统盘上，紧张的话换到别的盘）' : ''}
+                            </p>
+                        )}
+                        {/* ⚠️ 换目录**不搬文件**：老位置里那份原地留着（可能几 GB），
+                            所以必须说清「它还在那儿、要自己清」。 */}
+                        {ext.legacyDir && (
+                            <p className="hint">
+                                原位置还留着一份：{ext.legacyDir} —— 换目录不会自动搬或删文件，
+                                <strong>{t('确认新位置能用之后再手动清掉它')}</strong>。
+                            </p>
+                        )}
+                        {ext.hasRuntime && <p className="hint">{t('这个目录里已经有一份音轨分离运行时。')}</p>}
+                    </div>
+                </Panel>
+            )}
+        </>
     )
 }
 
@@ -563,6 +663,24 @@ function About({
     const toolsReady = ['ffmpeg', 'ytdlp'].filter((k) => state?.tools?.[k]?.available).length
     const {t} = useI18n()
 
+    /* 检查更新。只有真连不上 GitHub 才抛异常；「上游没发过 Release」「匿名调用
+       超额」都是 `ok: false` 的回包，落进 `update` 由面板照实说。 */
+    const [update, setUpdate] = useState<UpdateCheck | null>(null)
+    const [updateBusy, setUpdateBusy] = useState(false)
+    const [updateErr, setUpdateErr] = useState('')
+    const checkUpdate = async () => {
+        setUpdateBusy(true)
+        setUpdateErr('')
+        try {
+            setUpdate(await api.updateCheck())
+        } catch (e) {
+            setUpdate(null)
+            setUpdateErr(e instanceof Error ? e.message : String(e))
+        } finally {
+            setUpdateBusy(false)
+        }
+    }
+
     /* 「关于作者」那三个按钮：两个外链走系统默认浏览器（和 `Upstream` 同一条路，
        比指望 WebView 处理 `target="_blank"` 稳）；邮箱按钮复制到剪贴板 ——
        界面跑在 http://127.0.0.1 上，是安全上下文，剪贴板接口能用；万一被拒就提示手动抄。 */
@@ -627,6 +745,47 @@ function About({
                     </Button>
                     <Button onClick={() => onNavigate('dashboard')}>回到总览</Button>
                 </div>
+            </Panel>
+
+            {/* 检查更新：问一次 GitHub Releases。只查不装 —— 装不装由用户点发布页决定，
+           所以这里**没有**下载按钮。 */}
+            <Panel>
+                <PanelHead
+                    title={t('检查更新')}
+                    desc={t('从 GitHub 的 Release 页查一次最新发布')}
+                />
+                <p className="hint">当前版本：{state?.version ?? '未读取到'}</p>
+                <div className="btn-row">
+                    <Button loading={updateBusy} onClick={checkUpdate}>
+                        {t('检查更新')}
+                    </Button>
+                    {update?.ok && update.hasUpdate && (
+                        <Button
+                            variant="primary"
+                            onClick={() => openInBrowser(update.url ?? '')}
+                        >
+                            {t('打开发布页')}
+                        </Button>
+                    )}
+                </div>
+                {updateErr && <p className="hint">{updateErr}</p>}
+                {update?.ok === false && <p className="hint">{update.error}</p>}
+                {update?.ok && update.hasUpdate && (
+                    <>
+                        <Finding level="info" title={`${t('有新版本')}：${update.latest ?? ''}`}>
+                            {`${update.name ? `${update.name} · ` : ''}${t('发布于')} ${
+                                update.publishedAt ? update.publishedAt.slice(0, 10) : t('未知日期')
+                            }${update.prerelease ? t('（预览版）') : ''}`}
+                        </Finding>
+                        <pre className="job-log">{update.notes || t('这条发布没有写说明。')}</pre>
+                    </>
+                )}
+                {update?.ok && !update.hasUpdate && (
+                    <p className="hint">
+                        {t('已经是最新版本')}
+                        {update.latest ? `（${t('上游最新发布')}：${update.latest}）` : ''}
+                    </p>
+                )}
             </Panel>
 
             {/* 关于作者 → 作者的话 → 感谢名单 → 第三方组件许可总表，顺序固定：

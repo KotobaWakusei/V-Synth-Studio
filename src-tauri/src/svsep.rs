@@ -6,21 +6,23 @@
 //!
 //! ## 磁盘布局
 //!
+//! 一切都挂在**扩展包根**（`config.json` 的 `extDir`）下面；没配置时那个根就是
+//! 可写目录（绿色版 `<root>/data`、安装版 `%APPDATA%\…`），也就是老行为。
+//!
 //! ```text
-//! <root>/data/svsep/          运行时（随包分发，只读）
-//!   ├─ runtime/python.exe         Python 3.10 embeddable
-//!   ├─ backend/                   分离后端（app.py 等）
-//!   └─ bin/ffmpeg.exe
-//! <可写目录>/svsep/models/         模型（**不随包发**，用户按需下载）
-//!   ├─ UVR-MDX-NET-Inst_HQ_3.onnx 约 64 MB
-//!   └─ BS-Roformer-SW.ckpt        约 667 MB
-//! <可写目录>/svsep/{uploads,outputs,logs,data}/   运行期数据
+//! <扩展包根>/svsep/
+//!   ├─ runtime/python.exe         Python 3.10 embeddable（下 runtime.zip 得来）
+//!   ├─ backend/                   分离后端（app.py 等，**随程序分发**，不随 zip 下）
+//!   ├─ bin/ffmpeg.exe             **随程序分发**（`stage_runtime_assets` 补过来）
+//!   ├─ models/                    模型（**不随包发**，用户按需下载）
+//!   │   ├─ UVR-MDX-NET-Inst_HQ_3.onnx 约 64 MB
+//!   │   └─ BS-Roformer-SW.ckpt        约 667 MB
+//!   └─ {uploads,outputs,logs,data}/   运行期数据
 //! ```
 //!
-//! 绿色版里「可写目录」就是 `<root>/data`，所以开发机上模型落在
-//! `data/svsep/models/`，与运行时并排 —— 看起来像一体，其实是两件事：
-//! **运行时进安装包、模型不进**。安装版的模型在 `%APPDATA%` 下，因为
-//! Program Files 是只读的。
+//! ⚠️ **`backend/` 与 `bin/` 不随下载包走**，但 `python.exe` 要与它们同级才跑得起来。
+//! 所以用户一旦把扩展包换到别的盘，那两样必须**补过去**（见 [`stage_runtime_assets`]）——
+//! 漏了的表现是「运行时显示已就绪，一点开始分离就报找不到 app.py」。
 //!
 //! ## 我们对后端源码动过的唯一一处
 //!
@@ -133,67 +135,82 @@ pub fn runtime_url() -> String {
 
 /* ══════════════════════════════════ 路径 ══════════════════════════════════ */
 
-/// 运行时根目录：`<root>/data/svsep`
+/// 运行时根目录：`<扩展包根>/svsep`
 ///
-/// ⚠️ **这只是「默认/经典」落点，不一定是实际用的那个** —— 真正要用的路径一律走
-/// [`runtime_base`]：安装版装在 `Program Files` 下时这里不可写，4.7 GB 解压必然
-/// 「建目录失败」；另外 C 盘紧张的用户也会自己指定一个目录。
-pub fn runtime_dir(root: &Path) -> PathBuf {
-    root.join("data").join("svsep")
-}
-
-/// 用户选定的运行时落点（空 = 没选过，按 `installed` 推）。进程级一份，启动时定。
-static RUNTIME_BASE: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-/// 定下这一次运行要用哪个运行时目录。**启动时调一次**（见 `ipc::AppState::new`）。
-///
-/// 三条规矩，按优先级：
-///  1. 用户选过（`config.json` 的 `svsepRuntimeDir`）→ 听用户的；
-///  2. 安装版 → `<可写>/svsep`（`%APPDATA%\…\svsep`）：程序目录在 Program Files
-///     下只读，默认往那儿解 7.4 GB 是必失败；
-///     ⚠️ 但要是程序目录里**已经有一份完整的运行时**，继续用它 ——
-///     不能让用户白白重下 4.7 GB；
-///  3. 绿色版 → `<root>/data/svsep`。
-pub fn init_runtime_base(root: &Path, writable: &Path, installed: bool, configured: &str) {
-    if let Ok(mut g) = RUNTIME_BASE.lock() {
-        *g = Some(resolve_runtime_base(root, writable, installed, configured));
-    }
-}
-
-/// [`init_runtime_base`] 的**纯函数**部分（不碰全局）—— 这样它能被单测逐条钉住。
-pub fn resolve_runtime_base(
-    root: &Path,
-    writable: &Path,
-    installed: bool,
-    configured: &str,
-) -> PathBuf {
-    let explicit = configured.trim();
-    if !explicit.is_empty() {
-        return PathBuf::from(explicit);
-    }
-    if !installed {
-        return runtime_dir(root);
-    }
-    /* 安装版：程序目录（Program Files）只读，默认落 `<可写>/svsep`。
-    ⚠️ 但要是程序目录里**已经有一份完整的运行时**，继续用它 ——
-    不能让用户白白重下 4.7 GB。 */
-    let legacy = runtime_dir(root);
-    if legacy.join("runtime").join("python.exe").is_file() {
-        legacy
-    } else {
-        writable.join("svsep")
-    }
+/// ⚠️ **这只是「默认/经典」落点** —— 真正要用的路径一律走 [`runtime_base`]：
+/// 安装版装在 `Program Files` 下时这里不可写，4.7 GB 解压必然「建目录失败」；
+/// 另外 C 盘紧张的用户会把整个扩展包目录指定到别的盘。
+pub fn runtime_dir(ext: &Path) -> PathBuf {
+    ext.join("svsep")
 }
 
 /// 这一次运行真正用的运行时目录（`python.exe` 与 `backend/` 都在它下面）。
 ///
 /// **凡是拼运行时路径的地方都必须用它**，别再直接用 [`runtime_dir`]。
-pub fn runtime_base(root: &Path) -> PathBuf {
-    RUNTIME_BASE
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-        .unwrap_or_else(|| runtime_dir(root))
+/// `ext` 是扩展包根（`artifact::ext_of`）—— 用户指定过就指向他选的那个盘。
+pub fn runtime_base(ext: &Path) -> PathBuf {
+    runtime_dir(ext)
+}
+
+/// 把随包分发的 `backend/` 与 `bin/` 补进运行时目录，返回补了几个文件。
+///
+/// 为什么需要它：用户把扩展包指定到别的盘之后，那个目录里**没有**这两个子目录 ——
+/// 它们随程序分发（`bundle.resources` 的 `../data/svsep/{backend,bin}`）、不随 zip 下载，
+/// 而 `python.exe` 要找的正是同级的 `backend/app.py`、`bin/ffmpeg.exe`。
+/// 不补的话症状是「运行时显示已就绪，一点开始分离就报找不到 app.py」。
+///
+/// ⚠️ **只补缺的，不覆盖已有的**：目标目录里已经有一份就说明用户（或上一版）已经放好了，
+/// 覆盖它等于把用户手动打的补丁抹掉。所以这里逐文件 `create_new` 语义地拷，不做镜像。
+/// ⚠️ 默认落点（`<可写>/svsep`）下这两个目录本来就在，这里一个文件都不会动。
+pub fn stage_runtime_assets(bundled: &Path, ext: &Path) -> u64 {
+    let dest = runtime_base(ext);
+    let mut copied = 0;
+    for sub in ["backend", "bin"] {
+        let from = bundled.join(sub);
+        if !from.is_dir() {
+            continue;
+        }
+        copied += copy_missing(&from, &dest.join(sub));
+    }
+    if copied > 0 {
+        crate::log_line(&format!(
+            "已把随包分发的 backend / bin 补进运行时目录（{copied} 个文件 → {}）",
+            dest.to_string_lossy()
+        ));
+    }
+    copied
+}
+
+/// 把 `from` 树下**目标里还没有**的文件拷进 `to`。返回拷贝的文件数。
+///
+/// ⚠️ 用 `symlink_metadata` 而不是 `metadata` 判类型：符号链接（macOS 上 libresvip 那棵
+/// 树里有）跟着 `metadata` 会走到链接目标上去，`is_dir()` 判错就会把整个目标目录当文件拷。
+fn copy_missing(from: &Path, to: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(from) else {
+        return 0;
+    };
+    let mut n = 0;
+    for ent in rd.flatten() {
+        let src = ent.path();
+        let dst = to.join(ent.file_name());
+        let is_dir = ent.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            if std::fs::create_dir_all(&dst).is_ok() {
+                n += copy_missing(&src, &dst);
+            }
+            continue;
+        }
+        if dst.exists() {
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::copy(&src, &dst).is_ok() {
+            n += 1;
+        }
+    }
+    n
 }
 
 /* ═══════════════════ 显卡加速包（DirectML：A 卡 / Intel 核显） ═══════════════════ */
@@ -217,13 +234,13 @@ pub const DML_BYTES: u64 = 25_113_303;
 ///
 /// 为什么不直接覆盖 `site-packages/onnxruntime`：那会把 N 卡那份 CUDA 版**永久换掉**
 /// （用户哪天插上一张 N 卡也回不去）。分两份、由 `._pth` 决定谁在前，才是可逆的。
-pub fn dml_site_dir(root: &Path) -> PathBuf {
-    runtime_base(root).join("dml")
+pub fn dml_site_dir(ext: &Path) -> PathBuf {
+    runtime_base(ext).join("dml")
 }
 
 /// 加速包装没装（看那个 dll 在不在）。
-pub fn dml_installed(root: &Path) -> bool {
-    dml_site_dir(root)
+pub fn dml_installed(ext: &Path) -> bool {
+    dml_site_dir(ext)
         .join("onnxruntime")
         .join("capi")
         .join(crate::tools::dll("onnxruntime"))
@@ -234,8 +251,8 @@ pub fn dml_installed(root: &Path) -> bool {
 /// `PYTHONPATH`** —— 想让 DirectML 那份 ORT 生效只有改这个文件一条路
 /// （实测：设了 `PYTHONPATH` 也照样 import 到 `site-packages` 里那份）。
 /// 文件名带版本号，所以按前缀找，将来换 3.11 不用改代码。
-fn pth_file(root: &Path) -> Option<PathBuf> {
-    let dir = runtime_base(root).join("runtime");
+fn pth_file(ext: &Path) -> Option<PathBuf> {
+    let dir = runtime_base(ext).join("runtime");
     let rd = std::fs::read_dir(&dir).ok()?;
     let mut hits: Vec<PathBuf> = rd
         .flatten()
@@ -253,14 +270,14 @@ fn pth_file(root: &Path) -> Option<PathBuf> {
 }
 
 /// DirectML 现在生效没有（`._pth` 里有没有我们那一行）。
-pub fn dml_active(root: &Path) -> bool {
-    let Some(p) = pth_file(root) else {
+pub fn dml_active(ext: &Path) -> bool {
+    let Some(p) = pth_file(ext) else {
         return false;
     };
     let Ok(text) = std::fs::read_to_string(&p) else {
         return false;
     };
-    let want = crate::platform::clean_path(&dml_site_dir(root));
+    let want = crate::platform::clean_path(&dml_site_dir(ext));
     text.lines()
         .any(|l| crate::platform::clean_path(Path::new(l.trim())) == want)
 }
@@ -268,8 +285,8 @@ pub fn dml_active(root: &Path) -> bool {
 /// 开关 DirectML：改 `._pth` 里那一行（幂等，可反复调）。
 ///
 /// 行尾跟着原文件走：这个文件是 Python 自带的，别让它因为我们的编辑换一种换行。
-pub fn set_dml_active(root: &Path, on: bool) -> Result<bool, String> {
-    let Some(p) = pth_file(root) else {
+pub fn set_dml_active(ext: &Path, on: bool) -> Result<bool, String> {
+    let Some(p) = pth_file(ext) else {
         return Err("找不到随包 Python 的 ._pth（运行时布局变了？）".into());
     };
     let text =
@@ -279,7 +296,7 @@ pub fn set_dml_active(root: &Path, on: bool) -> Result<bool, String> {
     为什么非剥不可：那个前缀在 Python 的 `sys.path` 里是另一套语义，虽然实测
     CPython 3.10 能认，但不该赌；`clean_path` 就是干这件事的。
     比较时两边都归一化，所以盘上那条路径无论带不带前缀都能被认出来。 */
-    let want = crate::platform::clean_path(&dml_site_dir(root));
+    let want = crate::platform::clean_path(&dml_site_dir(ext));
     let before: Vec<String> = text
         .lines()
         .map(|l| l.trim_end_matches('\r').to_string())
@@ -326,8 +343,8 @@ pub fn nvidia_present() -> bool {
 ///
 /// 改法只认那一行的**前缀**（`use_dml = `）并且只在原缩进下动手，两边都能改回来；
 /// 升级运行时包之后上游要是改了写法，这里会安静地不生效 —— 日志是唯一线索。
-fn set_roformer_dml(root: &Path, on: bool) -> Result<bool, String> {
-    let f = runtime_base(root)
+fn set_roformer_dml(ext: &Path, on: bool) -> Result<bool, String> {
+    let f = runtime_base(ext)
         .join("backend")
         .join("roformer_engine.py");
     if !f.is_file() {
@@ -371,22 +388,22 @@ fn set_roformer_dml(root: &Path, on: bool) -> Result<bool, String> {
 ///
 /// `mode`：`"auto"`（默认）/ `"on"` / `"off"`；`six`：六轨要不要也用 DirectML。
 /// 返回 `(加速生效, 六轨补丁生效)`，给日志和状态用。
-pub fn apply_dml(root: &Path, mode: &str, six: bool) -> (bool, bool) {
+pub fn apply_dml(ext: &Path, mode: &str, six: bool) -> (bool, bool) {
     let want = match mode {
-        "on" => dml_installed(root),
+        "on" => dml_installed(ext),
         "off" => false,
         // auto：装了包、而且这台机器没有 N 卡（有 N 卡就该走 CUDA 那份）
-        _ => dml_installed(root) && !nvidia_present(),
+        _ => dml_installed(ext) && !nvidia_present(),
     };
-    let active = match set_dml_active(root, want) {
-        Ok(_) => dml_active(root),
+    let active = match set_dml_active(ext, want) {
+        Ok(_) => dml_active(ext),
         Err(e) => {
             crate::log_line(&format!("显卡加速：{e}"));
             false
         }
     };
     // 六轨补丁只在「加速真生效」时才有意义（DirectML 没生效的话那一行也不该开）
-    let six_ok = match set_roformer_dml(root, six && active) {
+    let six_ok = match set_roformer_dml(ext, six && active) {
         Ok(_) => six && active,
         Err(e) => {
             crate::log_line(&format!("六轨 DirectML：{e}"));
@@ -446,8 +463,8 @@ pub fn write_infer_mode(data_dir: &Path, mode: &str) -> Result<(), String> {
 ///
 /// ⚠️ 六轨补丁一律传 `false`：上游说 RoFormer 走 DirectML 容易 OOM，而显存不够时是
 /// **整个任务失败**（不是退回 CPU）。这里顺手把它关回去，老用户开过的也一并复位。
-pub fn apply_infer_mode(root: &Path, data_dir: &Path) -> bool {
-    let want = match read_infer_mode(data_dir).as_str() {
+pub fn apply_infer_mode(ext: &Path) -> bool {
+    let want = match read_infer_mode(&runtime_base(ext)).as_str() {
         "cpu" => "off",
         "gpu" => {
             if nvidia_present() {
@@ -458,7 +475,7 @@ pub fn apply_infer_mode(root: &Path, data_dir: &Path) -> bool {
         }
         _ => "auto",
     };
-    apply_dml(root, want, false).0
+    apply_dml(ext, want, false).0
 }
 
 /// 下 DirectML 加速包（24 MB）→ 解到 `<运行时>/dml` → 立刻生效。
@@ -466,14 +483,14 @@ pub fn apply_infer_mode(root: &Path, data_dir: &Path) -> bool {
 /// 24 MB 没必要走那套支持续传的大包机制（`.part` + 记号 + 五轮重试都在
 /// `fetch_to_file` 里，够用了）。
 pub async fn download_dml(
-    root: &Path,
+    ext: &Path,
     ctl: &DownloadCtl,
     on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync,
 ) -> Result<Value, String> {
-    let dest = dml_site_dir(root);
+    let dest = dml_site_dir(ext);
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("建目录失败（{}）：{e}", dest.to_string_lossy()))?;
-    let zip = runtime_base(root).join("svsep-dml.whl");
+    let zip = runtime_base(ext).join("svsep-dml.whl");
 
     fetch_to_file(DML_URL, &zip, Some(DML_BYTES), ctl, &|got, total, stage| {
         on_progress(got, total, stage)
@@ -483,8 +500,8 @@ pub async fn download_dml(
     // wheel 就是个 zip，根目录里是 `onnxruntime/` 与 `…dist-info/`，整包解到 dml/ 即可
     let report = unpack(&zip, &dest, "", &on_progress)?;
     let _ = std::fs::remove_file(&zip);
-    set_dml_active(root, true)?;
-    if !dml_installed(root) {
+    set_dml_active(ext, true)?;
+    if !dml_installed(ext) {
         return Err("包解开了，但没找到 onnxruntime/capi/onnxruntime.dll —— 包结构不对？".into());
     }
     Ok(json!({
@@ -495,36 +512,25 @@ pub async fn download_dml(
     }))
 }
 
-/// 模型目录：`<可写目录>/svsep/models`。
+/// 模型目录：`<扩展包根>/svsep/models`。
 ///
 /// ⚠️ 路径形状现在**只在 `artifact::ARTIFACTS` 里声明一次**（`svsep.models`
 /// 那条的 `places`）。这个函数是给下载/解包那几条链路用的**落点**，
 /// 它等于 `artifact::download_dest`；判「齐没齐」别用这个目录，
 /// 用 `artifact::ready` / `artifact::missing`（那才认随包那一层）。
-pub fn models_dir(writable: &Path) -> PathBuf {
-    let ctx = crate::artifact::Ctx::with_svsep(writable, writable, Path::new(""));
+pub fn models_dir(ext: &Path) -> PathBuf {
+    /* 三个基准（`root` / 可写 / svsep）一律传 `ext`：`svsep.models` 那条只查
+       `Base::Ext`，其它基准不会被用到 —— 传什么进去都不会影响结果，而传 `ext`
+       至少保证「万一将来这条 places 改了」不会指到一个莫名其妙的目录。 */
+    let ctx = crate::artifact::Ctx::with_dirs(ext, ext, ext, ext);
     crate::artifact::download_dest(
         &ctx,
         crate::artifact::get("svsep.models").expect("表里必须有 svsep.models"),
     )
 }
 
-/// 后端看到的 `BASE_DIR` —— 与 `runtime_dir()` 同一个地方。
-///
-/// `CHIXIAOYANG_DATA_DIR` 指的也是它，所以 uploads / outputs / logs 会落在
-/// `<root>/data/svsep/` 下面。绿色版能写；安装版不能写，那时上面的
-/// `models_dir()` 已经在 `%APPDATA%` 了，但**运行时的 uploads 也得跟着走** ——
-/// 见 `data_dir()`。
-pub fn data_dir(root: &Path, writable: &Path, installed: bool) -> PathBuf {
-    if installed {
-        writable.join("svsep")
-    } else {
-        runtime_dir(root)
-    }
-}
-
-fn python_exe(root: &Path) -> PathBuf {
-    runtime_base(root).join("runtime").join("python.exe")
+fn python_exe(ext: &Path) -> PathBuf {
+    runtime_base(ext).join("runtime").join("python.exe")
 }
 
 /// 运行时是否齐备（Python + 后端）。
@@ -532,22 +538,22 @@ fn python_exe(root: &Path) -> PathBuf {
 /// ⚠️ 「齐的判据」**只在 `artifact::ARTIFACTS` 里声明一次**（`svsep.runtime`
 /// 那条的 `need`）。这里委托过去，是为了让判据只有一份真相 ——
 /// 判据改了只改那一处。
-pub fn runtime_ready(root: &Path) -> bool {
+pub fn runtime_ready(ext: &Path) -> bool {
     let a = crate::artifact::get("svsep.runtime").expect("表里必须有 svsep.runtime");
-    crate::artifact::ready_in(&runtime_base(root), a)
+    crate::artifact::ready_in(&runtime_base(ext), a)
 }
 
 /// 运行时状态（给 `/api/svsep/status` 用的那一段）。
 ///
 /// 为什么不去统计目录里的实际字节数：2.4 万个文件、每次轮询都走一遍，
 /// 在机械盘上要几秒 —— 而界面只需要「在不在」和一个够用的分母。
-pub fn runtime_status(root: &Path) -> Value {
-    let dir = runtime_base(root);
-    let py = python_exe(root);
+pub fn runtime_status(ext: &Path) -> Value {
+    let dir = runtime_base(ext);
+    let py = python_exe(ext);
     let backend = dir.join("backend").join("app.py");
     json!({
         "dir": dir.to_string_lossy(),
-        "ready": runtime_ready(root),
+        "ready": runtime_ready(ext),
         // ⚠️ 用 `runtime_url()` 不用常量：开发机用环境变量顶掉链接时，界面显示的
         //    也得是那个顶掉的地址，否则会出现「界面说没配、其实配了」这种鬼状态。
         "downloadUrl": runtime_url(),
@@ -576,15 +582,14 @@ fn file_size(p: &Path) -> u64 {
 /// 两个模型都在不在 —— 界面上的「还没下模型」就靠这个。
 ///
 /// ⚠️ 判据（哪两个文件、各自的字节下限）只在 `artifact::ARTIFACTS` 的
-/// `svsep.models` 那条里声明一次。这里的 `root` 参数被忽略了：模型只有
-/// 「可写目录」这一层（它 <b>不</b>随包分发，见 .gitignore 那段说明）。
-pub fn models_ok(writable: &Path) -> bool {
-    crate::artifact::ready_in_dir(&models_dir(writable), "svsep.models")
+/// `svsep.models` 那条里声明一次。模型只有「扩展包根」这一层（它 <b>不</b>随包分发）。
+pub fn models_ok(ext: &Path) -> bool {
+    crate::artifact::ready_in_dir(&models_dir(ext), "svsep.models")
 }
 
 /// 模型状态（给 `/api/svsep/status` 用的那一段）
-pub fn models_status(writable: &Path) -> Value {
-    let dir = models_dir(writable);
+pub fn models_status(ext: &Path) -> Value {
+    let dir = models_dir(ext);
     /* 逐项状态走 `artifact` 那一份判据（哪两个文件、各自的字节下限只在那里声明一次）。
     这里报的 `expectedSize` 用的是 `*_MODEL_FULL`（展示用的完整大小），
     与判据那个下限**是两个数**，别混。 */
@@ -631,10 +636,10 @@ pub fn models_status(writable: &Path) -> Value {
 ///
 /// 两个包的落点不一样（模型的 `dest` 是 `models/`，运行时的是 `svsep/` 本身），
 /// 所以别自己拼 `dest.join(...)` —— 走 `Bundle`，落点只有一个定义处。
-pub fn part_path(root: &Path, writable: &Path, kind: &str) -> Option<PathBuf> {
+pub fn part_path(ext: &Path, kind: &str) -> Option<PathBuf> {
     let b = match kind {
-        "models" => Bundle::models(writable, None),
-        "runtime" => Bundle::runtime(root, None),
+        "models" => Bundle::models(ext, None),
+        "runtime" => Bundle::runtime(ext, None),
         _ => return None,
     };
     Some(b.dest.join(format!("{}.part", b.zip_name)))
@@ -659,8 +664,8 @@ fn stored_resume(part: &Path, url: &str) -> bool {
 /// ⚠️ **看盘，不看内存里的记号**：工作站在下载中途被关掉、或者进程重启之后，
 /// 那个 `(种类, 链接)` 的记忆就没了，而 4.7 GB 的半个包还在盘上 —— 只看内存
 /// 会让界面以为「没下过」，用户一点就从零开始，白下几个 GB。
-pub fn resume_point(root: &Path, writable: &Path, kind: &str, url: &str) -> Option<u64> {
-    let part = part_path(root, writable, kind)?;
+pub fn resume_point(ext: &Path, kind: &str, url: &str) -> Option<u64> {
+    let part = part_path(ext, kind)?;
     if !stored_resume(&part, url) {
         return None;
     }
@@ -669,8 +674,8 @@ pub fn resume_point(root: &Path, writable: &Path, kind: &str, url: &str) -> Opti
 }
 
 /// 收场之后收拾记号：暂停留着（下次还要用），下完/出错/停止都删掉。
-pub fn clear_resume_marker(root: &Path, writable: &Path, kind: &str) {
-    if let Some(part) = part_path(root, writable, kind) {
+pub fn clear_resume_marker(ext: &Path, kind: &str) {
+    if let Some(part) = part_path(ext, kind) {
         let _ = std::fs::remove_file(url_marker(&part));
     }
 }
@@ -678,10 +683,12 @@ pub fn clear_resume_marker(root: &Path, writable: &Path, kind: &str) {
 /* ══════════════════════════════ 子进程管理 ══════════════════════════════ */
 
 /// 分离服务。**由 `AppState` 持有**，进程活到工作站退出为止。
+///
+/// ⚠️ **只记 `writable`**：运行时 / 模型 / 数据目录全都从**扩展包根**推出来，
+/// 而那个根是「进程级的当前设置」（`artifact::ext_of`）—— 用户在界面上换了目录
+/// 就该立刻指到新地方，所以这里不缓存它。
 pub struct Svsep {
-    root: PathBuf,
     writable: PathBuf,
-    installed: bool,
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
     /// 串行化启动流程。start() 中间会 await 健康检查；普通 Mutex 不能跨 await，
@@ -695,11 +702,9 @@ pub struct Svsep {
 }
 
 impl Svsep {
-    pub fn new(root: PathBuf, writable: PathBuf, installed: bool) -> Self {
+    pub fn new(writable: PathBuf) -> Self {
         Self {
-            root,
             writable,
-            installed,
             child: Mutex::new(None),
             port: Mutex::new(None),
             start_lock: tokio::sync::Mutex::new(()),
@@ -712,25 +717,30 @@ impl Svsep {
         &self.writable
     }
 
+    /// 扩展包根（用户可能把它指到了别的盘）。
+    fn ext(&self) -> PathBuf {
+        crate::artifact::ext_of(&self.writable)
+    }
+
     pub fn runtime_ready(&self) -> bool {
-        runtime_ready(&self.root)
+        runtime_ready(&self.ext())
     }
 
     pub fn dir(&self) -> PathBuf {
-        runtime_base(&self.root)
+        runtime_base(&self.ext())
     }
 
     pub fn models(&self) -> PathBuf {
-        models_dir(&self.writable)
+        models_dir(&self.ext())
     }
 
     pub fn models_ok(&self) -> bool {
-        models_ok(&self.writable)
+        models_ok(&self.ext())
     }
 
-    /// 数据目录（uploads / outputs / logs）
+    /// 运行时自己的数据目录（uploads / outputs / logs）—— 见 `runtime_base`。
     pub fn data(&self) -> PathBuf {
-        data_dir(&self.root, &self.writable, self.installed)
+        runtime_base(&self.ext())
     }
 
     fn port(&self) -> Option<u16> {
@@ -784,7 +794,7 @@ impl Svsep {
         let models = self.models();
         std::fs::create_dir_all(&models).map_err(|e| format!("建模型目录失败：{e}"))?;
 
-        let exe = python_exe(&self.root);
+        let exe = python_exe(&self.ext());
         let script = self.dir().join("backend").join("app.py");
 
         // 端口：从默认值往后试，谁先空着用谁
@@ -857,7 +867,10 @@ impl Svsep {
             .env("CHIXIAOYANG_MODELS_DIR", models)
             .env("PYTHONIOENCODING", "utf-8")
             .env("PYTHONUTF8", "1")
-            .current_dir(&self.root)
+            /* 工作目录 = 运行时根（`python.exe` 与 `backend/` 那一层）。
+            ⚠️ 它**不是**程序目录：用户把扩展包换到别的盘之后，程序目录里既没有
+            `python.exe` 也没有 `backend/`，从那儿起进程会让 Python 的相对导入找不到东西。 */
+            .current_dir(self.dir())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1331,25 +1344,25 @@ struct Bundle<'a> {
 }
 
 impl<'a> Bundle<'a> {
-    fn models(writable: &Path, url: Option<&'a str>) -> Self {
+    fn models(ext: &Path, url: Option<&'a str>) -> Self {
         Self {
             const_name: "MODEL_URL",
             label: "模型",
             default_url: MODEL_URL,
             url,
-            dest: models_dir(writable),
+            dest: models_dir(ext),
             strip: "models/",
             zip_name: "svsep-models.zip",
         }
     }
 
-    fn runtime(root: &Path, url: Option<&'a str>) -> Self {
+    fn runtime(ext: &Path, url: Option<&'a str>) -> Self {
         Self {
             const_name: "RUNTIME_URL",
             label: "运行时",
             default_url: RUNTIME_URL,
             url,
-            dest: runtime_base(root),
+            dest: runtime_base(ext),
             strip: "", // 留着 runtime/ 这一层：那边要的正是 runtime/python.exe
             zip_name: "svsep-runtime.zip",
         }
@@ -1556,12 +1569,12 @@ async fn fetch_bundle(
     }
 }
 
-/// 下载模型 zip 并解压到 `<可写>/svsep/models/`。
+/// 下载模型 zip 并解压到 `<扩展包根>/svsep/models/`。
 ///
 /// 用户可以暂停 / 停止（`ctl`），暂停后 `.part` 留着、下次 `resume_url` 指同一条
 /// 链接就接着下；停止会把 `.part` 删掉，下次从头下。
 pub async fn download_models(
-    writable: &Path,
+    ext: &Path,
     url: &str,
     ctl: &DownloadCtl,
     on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync + 'static,
@@ -1571,7 +1584,7 @@ pub async fn download_models(
     } else {
         Some(url)
     };
-    let b = Bundle::models(writable, given);
+    let b = Bundle::models(ext, given);
     // 三种收场统一成「一个带 paused / cancelled 标志的对象」，界面只看这两个
     // 标志决定进度条是消失还是留着。落盘状态（`models` / `runtime`）由
     // `ipc::svsep` 拼 —— 它同时也在拼 `/api/svsep/status`。
@@ -1592,12 +1605,12 @@ pub async fn download_models(
     })
 }
 
-/// 下载运行时 zip 并解压到 `<root>/data/svsep/`（`runtime/` 那一层留着）。
+/// 下载运行时 zip 并解压到 `<扩展包根>/svsep/`（`runtime/` 那一层留着）。
 ///
 /// ⚠️ 这个包**几 GB**，只该下一次：文件多、解压慢。换工作站版本时运行时通常
 /// 不变 —— 变的是 `backend/` 那几个 .py，而**那部分随程序打包**，不走这里。
 pub async fn download_runtime(
-    root: &Path,
+    ext: &Path,
     url: &str,
     ctl: &DownloadCtl,
     on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync + 'static,
@@ -1607,7 +1620,7 @@ pub async fn download_runtime(
     } else {
         Some(url)
     };
-    let b = Bundle::runtime(root, given);
+    let b = Bundle::runtime(ext, given);
     Ok(match fetch_bundle(&b, ctl, &on_progress).await? {
         FetchOutcome::Done(mut v) => {
             if let Some(o) = v.as_object_mut() {
@@ -1728,12 +1741,12 @@ fn sweep_part_files(dir: &Path) -> (u64, u64) {
 ///
 /// ⚠️ **运行时也在里面**，用户点之前必须知道：删完要重新下 4.7 GB 才能用分离。
 /// ⚠️ **只删「下下来的」那几层，不是整个 `svsep/`**。这个区别是最容易写错的地方：
-///    `runtime_dir()` 指的是整个 `<root>/data/svsep/`，而那一层下面还住着
-///    `backend/`（分离后端的 .py，**随程序打包、不该删**）和运行期的
-///    `data/ logs/ outputs/ uploads/`（用户的东西）。所以要拼三个具体目录：
-///      · 模型   `<可写>/svsep/models`（下模型包时解到这儿）
-///      · 运行时 `<root>/data/svsep/runtime`（下运行时包时解到这儿）
-///      · ffmpeg `<root>/data/svsep/bin`（跟运行时同一个包里的，见
+///    `<扩展包根>/svsep/` 下面还住着 `backend/`（分离后端的 .py，**随程序打包、
+///    不该删**）和运行期的 `data/ logs/ outputs/ uploads/`（用户的东西）。
+///    所以要拼三个具体目录：
+///      · 模型   `<扩展包根>/svsep/models`
+///      · 运行时 `<扩展包根>/svsep/runtime`
+///      · ffmpeg `<扩展包根>/svsep/bin`（跟运行时同一个包里的，见
 ///        `backend/config.py::_ensure_ffmpeg_on_path` —— 删了等于没装）
 /// ⚠️ 三个目录都是一个一个删文件（不是 `remove_dir_all`）：几万个文件里总有几个
 ///    被别的进程占着（杀软扫描、残留的 python），一个失败就整段放弃最糟 ——
@@ -1744,14 +1757,14 @@ fn sweep_part_files(dir: &Path) -> (u64, u64) {
 /// `on_progress` 收 `FnMut` —— 它的调用方基本都是就地改一个计数器，
 /// 收 `Fn` 会逼着每个人套一层 `Cell`。
 pub fn delete_dependencies(
-    root: &Path,
     writable: &Path,
     cancelled: impl Fn() -> bool,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Value {
-    let svsep = runtime_base(root);
+    let ext = crate::artifact::ext_of(writable);
+    let svsep = runtime_base(&ext);
     let targets = [
-        ("模型", models_dir(writable)),
+        ("模型", models_dir(&ext)),
         ("运行时", svsep.join("runtime")),
         ("ffmpeg", svsep.join("bin")),
     ];
@@ -1767,6 +1780,9 @@ pub fn delete_dependencies(
     //    ⚠️ 这一遍必须在 walk **之前**、且不能放进下面那个循环里：放进循环会把
     //    `models/` 里的 `.part` 数两遍（先扫掉一次，walk 时文件已经没了但计数早加过），
     //    于是报「已删 7 个」而实际只有 6 个文件。
+    //    ⚠️ 加上 `<可写>/svsep` 那一份**是为了老落点**：用户把扩展包换到别的盘之后，
+    //    原来那个盘上可能还留着半个 zip（几 GB），而按钮写着「删除全部依赖」。
+    //    两个目录相同时 `sweep_part_files` 第二次扫到的是空目录，不会重复计数。
     for d in [svsep.clone(), writable.join("svsep")] {
         let (f, b) = sweep_part_files(&d);
         removed_files += f;
@@ -1973,90 +1989,102 @@ pub fn extract_zip(
 mod tests {
     use super::*;
 
-    /// 运行时的落点：**安装版不能再往 Program Files 里解 7.4 GB**（那里只读，
-    /// 解不动），但程序目录里已经有运行时的话不许逼人重下。
+    /// 运行时落在**扩展包根**下的 `svsep/`；扩展包根没配置时就是可写目录。
+    ///
+    /// 这一条钉的是「默认行为一步都没变」：老用户（`extDir` 空）的运行时与模型
+    /// 仍然在原来那个地方，改动只是把「根」抽出来可配置。
     #[test]
-    fn runtime_base_follows_the_writable_dir_for_an_installed_copy() {
-        // 夹具用临时目录当「程序目录」：真去写 Program Files 会直接 Access Denied
-        let root = std::env::temp_dir().join("vss-svsep-install-base");
-        let writable = std::env::temp_dir().join("vss-svsep-install-writable");
-        let _ = std::fs::remove_dir_all(&root);
-        let _ = std::fs::remove_dir_all(&writable);
-
-        // 绿色版：落 `<root>/data/svsep`
+    fn the_runtime_lives_under_the_extension_root() {
+        let writable = std::env::temp_dir().join("vss-svsep-ext-root");
+        // 没配置 → 根就是可写目录（`artifact::ext_of` 的默认）
+        assert_eq!(crate::artifact::ext_of(&writable), writable);
+        assert_eq!(runtime_base(&writable), writable.join("svsep"));
         assert_eq!(
-            resolve_runtime_base(&root, &writable, false, ""),
-            root.join("data").join("svsep")
+            models_dir(&writable),
+            writable.join("svsep").join("models"),
+            "模型与运行时并排在 svsep/ 下"
+        );
+        assert_eq!(dml_site_dir(&writable), writable.join("svsep").join("dml"));
+    }
+
+    /// 换了扩展包目录之后，`svsep/` 下面必须把随包分发的 `backend/` 与 `bin/` 补上。
+    ///
+    /// 不补的症状：运行时显示「已就绪」，一点开始分离就报找不到 `app.py`（那两个
+    /// 目录随程序分发、不在 runtime.zip 里）。顺带钉住「只补缺的、不覆盖已有的」——
+    /// 覆盖会把用户在盘上手改过的那份抹掉。
+    #[test]
+    fn staging_copies_the_bundled_backend_and_bin() {
+        let base = std::env::temp_dir().join("vss-svsep-stage");
+        let _ = std::fs::remove_dir_all(&base);
+        let bundled = base.join("data").join("svsep");
+        let ext = base.join("ext");
+
+        std::fs::create_dir_all(bundled.join("backend")).unwrap();
+        std::fs::write(bundled.join("backend").join("app.py"), b"print(1)").unwrap();
+        std::fs::create_dir_all(bundled.join("bin")).unwrap();
+        std::fs::write(bundled.join("bin").join("ffmpeg.exe"), b"MZ").unwrap();
+
+        let n = stage_runtime_assets(&bundled, &ext);
+        assert_eq!(n, 2, "backend/app.py 与 bin/ffmpeg.exe 各一个");
+        assert!(runtime_base(&ext).join("backend").join("app.py").is_file());
+        assert!(runtime_base(&ext).join("bin").join("ffmpeg.exe").is_file());
+
+        // 再补一次：什么都不缺，一个都不拷
+        assert_eq!(stage_runtime_assets(&bundled, &ext), 0);
+        // 目标里已有的**不许覆盖**（那是用户手改过的那份）
+        std::fs::write(runtime_base(&ext).join("backend").join("app.py"), b"mine").unwrap();
+        std::fs::write(bundled.join("backend").join("extra.py"), b"x").unwrap();
+        assert_eq!(stage_runtime_assets(&bundled, &ext), 1, "只补新增的那个");
+        assert_eq!(
+            std::fs::read(runtime_base(&ext).join("backend").join("app.py")).unwrap(),
+            b"mine"
         );
 
-        // 安装版 + 程序目录里没有运行时 → 落到可写目录
-        assert_eq!(
-            resolve_runtime_base(&root, &writable, true, ""),
-            writable.join("svsep")
-        );
-
-        // 安装版 + 程序目录里**已经有一份** → 继续用它，不重下 4.7 GB
-        let legacy = root.join("data").join("svsep");
-        let py = legacy.join("runtime").join("python.exe");
-        std::fs::create_dir_all(py.parent().unwrap()).unwrap();
-        std::fs::write(&py, b"x").unwrap();
-        assert_eq!(resolve_runtime_base(&root, &writable, true, ""), legacy);
-        let _ = std::fs::remove_dir_all(root.join("data"));
-
-        // 用户选过就听用户的（前后空格要忽略）
-        assert_eq!(
-            resolve_runtime_base(&root, &writable, true, r"  D:\VSS\runtime  "),
-            PathBuf::from(r"D:\VSS\runtime")
-        );
-        // 空白串等于没选
-        assert_eq!(
-            resolve_runtime_base(&root, &writable, true, "   "),
-            writable.join("svsep")
-        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// DirectML 的开关就是 `python310._pth` 里那一行 —— 幂等、可逆、行尾跟着原文件。
     #[test]
     fn dml_switch_flips_the_pth_line_both_ways() {
-        let root = std::env::temp_dir().join("vss-svsep-dml-test");
-        let _ = std::fs::remove_dir_all(&root);
-        let rt = runtime_dir(&root).join("runtime");
+        let ext = std::env::temp_dir().join("vss-svsep-dml-test");
+        let _ = std::fs::remove_dir_all(&ext);
+        let rt = runtime_dir(&ext).join("runtime");
         std::fs::create_dir_all(&rt).unwrap();
         let pth = rt.join("python310._pth");
         std::fs::write(&pth, "python310.zip\n.\n\n# c\nimport site\n").unwrap();
 
         // 夹具里没有 dml 包 → `installed` 是 false（判据是那个 dll）
-        assert!(!dml_installed(&root));
+        assert!(!dml_installed(&ext));
 
         // 开：那一行插到**最前面**（必须排在 `import site` 之前才抢得到 onnxruntime）
-        assert!(set_dml_active(&root, true).unwrap());
+        assert!(set_dml_active(&ext, true).unwrap());
         let text = std::fs::read_to_string(&pth).unwrap();
         let first = text.lines().next().unwrap();
-        assert_eq!(first, dml_site_dir(&root).to_string_lossy());
+        assert_eq!(first, dml_site_dir(&ext).to_string_lossy());
         assert!(text.contains("import site"), "原来的内容不能弄丢：{text:?}");
-        assert!(dml_active(&root));
+        assert!(dml_active(&ext));
 
         // 再开一次什么都不做（幂等）
-        assert!(!set_dml_active(&root, true).unwrap());
+        assert!(!set_dml_active(&ext, true).unwrap());
 
         // 关：那一行没了，其余照旧
-        assert!(set_dml_active(&root, false).unwrap());
+        assert!(set_dml_active(&ext, false).unwrap());
         let text = std::fs::read_to_string(&pth).unwrap();
-        assert!(!dml_active(&root));
+        assert!(!dml_active(&ext));
         assert!(text.starts_with("python310.zip"));
         assert!(text.contains("import site"));
 
         // 行尾跟着原文件：本来是 LF 就还是 LF
         assert!(!text.contains("\r\n"));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&ext);
     }
 
     /// 六轨补丁只认那一行的前缀，两边都能改回来（上游升级了也不会被改坏）。
     #[test]
     fn roformer_patch_is_reversible_and_ignores_foreign_code() {
-        let root = std::env::temp_dir().join("vss-svsep-roformer-test");
-        let _ = std::fs::remove_dir_all(&root);
-        let backend = runtime_dir(&root).join("backend");
+        let ext = std::env::temp_dir().join("vss-svsep-roformer-test");
+        let _ = std::fs::remove_dir_all(&ext);
+        let backend = runtime_dir(&ext).join("backend");
         std::fs::create_dir_all(&backend).unwrap();
         let f = backend.join("roformer_engine.py");
         std::fs::write(
@@ -2065,7 +2093,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(set_roformer_dml(&root, true).unwrap());
+        assert!(set_roformer_dml(&ext, true).unwrap());
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(t.contains("use_dml = True"), "{t}");
         assert!(
@@ -2073,12 +2101,12 @@ mod tests {
             "别的行不许动"
         );
         // 幂等
-        assert!(!set_roformer_dml(&root, true).unwrap());
+        assert!(!set_roformer_dml(&ext, true).unwrap());
         // 关得回来
-        assert!(set_roformer_dml(&root, false).unwrap());
+        assert!(set_roformer_dml(&ext, false).unwrap());
         let t = std::fs::read_to_string(&f).unwrap();
         assert!(t.contains("        use_dml = False"), "{t}");
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&ext);
     }
 
     /* ⚠️ 三态判据（缺 / 半个 / 齐）的测试在
@@ -2791,7 +2819,7 @@ mod tests {
             .join("svsep-models.zip.part");
         assert!(file_size(&part) > 0, "放弃之后半个包也没了，下次只能从头下");
         assert_eq!(
-            resume_point(&dest, &dest, "models", &url),
+            resume_point(&dest, "models", &url),
             Some(file_size(&part)),
             "留下的半个包认不出来（`resume_point` 拿不到断点）"
         );
@@ -2923,21 +2951,23 @@ mod tests {
 
     #[test]
     fn delete_dependencies_clears_both_dirs_and_the_half_downloaded_zip() {
-        // 摆出真实布局：<writable> 与 <root> 是两个不同的地方，只有
-        // `models/` 在 writable 下、`runtime/` 在 root 下 —— 删错一个都不会报错，
-        // 只会在用户点「开始分离」时才现形。
+        /* 摆出真实布局：扩展包根（= 可写目录，`extDir` 没配置时就是这个）下面是
+        `svsep/{models,runtime,bin}`；`models/` 与 `runtime/` 是**两个**目标目录，
+        删错一个都不会报错，只会在用户点「开始分离」时才现形。
+        ⚠️ 程序目录（`root`）在这里**故意不放东西**：它一个字节都不该被这个按钮碰到。 */
         let base = std::env::temp_dir().join("vss-svsep-del-test");
         // ⚠️ 先清干净再摆：留着上一轮跑剩的文件时，个数断言会随上一次成不成而变。
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("root");
         let writable = base.join("writable");
-        let svsep = root.join("data").join("svsep");
-        let models = writable.join("svsep").join("models");
+        let svsep = writable.join("svsep");
+        let models = svsep.join("models");
         std::fs::create_dir_all(models.join("sub")).unwrap();
         std::fs::create_dir_all(svsep.join("runtime").join("Lib")).unwrap();
         std::fs::create_dir_all(svsep.join("bin")).unwrap();
         // 随程序打包的分离后端 + 用户的输出目录：**删依赖时一个都不该动**
         std::fs::create_dir_all(svsep.join("outputs")).unwrap();
+        std::fs::create_dir_all(root.join("data")).unwrap();
 
         std::fs::write(models.join("BS-Roformer-SW.ckpt"), vec![7u8; 4096]).unwrap();
         std::fs::write(models.join("sub").join("x.yaml"), b"y").unwrap();
@@ -2956,7 +2986,7 @@ mod tests {
         std::fs::write(svsep.join("config.py"), b"X = 1").unwrap();
 
         let mut last = (0u64, 0u64);
-        let v = delete_dependencies(&root, &writable, || false, |f, b| last = (f, b));
+        let v = delete_dependencies(&writable, || false, |f, b| last = (f, b));
 
         let files = v.get("removedFiles").and_then(|x| x.as_u64()).unwrap();
         let bytes = v.get("removedBytes").and_then(|x| x.as_u64()).unwrap();
@@ -2984,12 +3014,12 @@ mod tests {
         );
 
         // 再删一次：目录都空了，不能再报出个数来（否则按钮会一直说「已删 5 个」）
-        let v2 = delete_dependencies(&root, &writable, || false, |_, _| {});
+        let v2 = delete_dependencies(&writable, || false, |_, _| {});
         assert_eq!(v2.get("removedFiles").and_then(|x| x.as_u64()), Some(0));
 
         // 用户按了停止：一个都不删
         std::fs::write(models.join("again.onnx"), b"z").unwrap();
-        let v3 = delete_dependencies(&root, &writable, || true, |_, _| {});
+        let v3 = delete_dependencies(&writable, || true, |_, _| {});
         assert_eq!(v3.get("cancelled").and_then(|x| x.as_bool()), Some(true));
         assert_eq!(v3.get("removedFiles").and_then(|x| x.as_u64()), Some(0));
         assert!(models.join("again.onnx").is_file());
@@ -3003,19 +3033,18 @@ mod tests {
         // 而不是任何内存里的记号（进程重启后记号就没了）。
         let base = std::env::temp_dir().join("vss-svsep-resume-test");
         let _ = std::fs::remove_dir_all(&base);
-        let root = base.join("root");
         let writable = base.join("writable");
         std::fs::create_dir_all(writable.join("svsep").join("models")).unwrap();
         let url = "https://example.test/svsep-models.zip";
 
         // ① 什么都没有：不能续
-        assert_eq!(resume_point(&root, &writable, "models", url), None);
+        assert_eq!(resume_point(&writable, "models", url), None);
         // 未知的种类（拼错 kind 不该 panic，也不该乱指一个目录）
-        assert_eq!(part_path(&root, &writable, "nope"), None);
+        assert_eq!(part_path(&writable, "nope"), None);
 
         // ② 只有半个包、没有记号：不认。`.part` 只有字节没有出处，拿它接一个
         //    别的链接的 Range 会拼出坏 zip（要到解压才炸）。
-        let part = part_path(&root, &writable, "models").unwrap();
+        let part = part_path(&writable, "models").unwrap();
         assert_eq!(
             part,
             writable
@@ -3026,31 +3055,31 @@ mod tests {
         );
         std::fs::write(&part, vec![0u8; 1234]).unwrap();
         assert_eq!(
-            resume_point(&root, &writable, "models", url),
+            resume_point(&writable, "models", url),
             Some(1234),
             "记号缺失（老版本留的半个包）算能续：为了几十字节的记号丢掉几个 GB 是坏交易"
         );
         // 补上记号之后还是同一个答案
         crate::download::write_url_marker(&part, url).unwrap();
-        assert_eq!(resume_point(&root, &writable, "models", url), Some(1234));
+        assert_eq!(resume_point(&writable, "models", url), Some(1234));
 
         // ③ 记号写着**别的**链接：不认 —— 这才是那个记号存在的理由
         crate::download::write_url_marker(&part, "https://other.test/svsep-models.zip").unwrap();
-        assert_eq!(resume_point(&root, &writable, "models", url), None);
+        assert_eq!(resume_point(&writable, "models", url), None);
 
         // ④ 记号是空文件（写到一半被杀）：也当「对不上」，宁可从零下
         std::fs::write(url_marker(&part), b"").unwrap();
-        assert_eq!(resume_point(&root, &writable, "models", url), None);
+        assert_eq!(resume_point(&writable, "models", url), None);
 
         // ⑤ 收场后清记号：半个包不再算数
         crate::download::write_url_marker(&part, url).unwrap();
-        clear_resume_marker(&root, &writable, "models");
+        clear_resume_marker(&writable, "models");
         assert!(!url_marker(&part).exists());
-        assert_eq!(resume_point(&root, &writable, "models", url), Some(1234));
+        assert_eq!(resume_point(&writable, "models", url), Some(1234));
 
         // ⑥ 空文件不算数：续到 0 字节等于没续，还得白跑一次 Range 请求
         std::fs::write(&part, b"").unwrap();
-        assert_eq!(resume_point(&root, &writable, "models", url), None);
+        assert_eq!(resume_point(&writable, "models", url), None);
 
         let _ = std::fs::remove_dir_all(&base);
     }

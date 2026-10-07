@@ -17,11 +17,17 @@
   `window` 都拿不到，也就永远碰不到 `window.__TAURI_INTERNALS__`（读文件、写文件那一套）。
 
   协议（父 → 这里）
+    {type:'hello'} —— 「你起来了吗」，收到就回一条 boot
     {type:'mount', pkg: ArrayBuffer, project: object|null, key: string, fps?: number}
     {type:'pause'} {type:'resume'} {type:'volume', v: number} {type:'destroy'}
   协议（这里 → 父）
     {type:'boot'} {type:'status', message} {type:'ready', info} {type:'error', message}
     {type:'diagnostic', message}
+
+  ⚠️ **boot 必须能被再问一次**（上面的 `hello`）。这里加载完就主动 post 一条 boot，
+  但父窗口那个监听器是 React 的 effect 注册的、晚于本页脚本执行，所以**重启工作站时
+  那条 boot 常常没有人听见** —— 表现就是「这一次打开背景是黑的/不动的」。父窗口起来
+  之后会问一次 `hello`，这里如实再回一条。少了这条应答，开场那次错过就永远接不上。
 
   ⚠️ 只走 `bytesSource`：宿主已经用 IPC 把 `scene.pkg` 的字节读出来了，这里**不许**联网，
   也不用 Tauri 的 asset 协议（不透明源下那属于跨源请求，没必要）。
@@ -51,6 +57,7 @@ Object.defineProperty(window, 'caches', {value: undefined, configurable: true})
   addEventListener('message', async (ev) => {
     const d = ev.data || {}
     try {
+      if (d.type === 'hello') { post({ type: 'boot' }); return }
       if (d.type === 'mount') {
         if (inst) { inst.destroy(); inst = null }
         post({ type: 'status', message: '装配场景…' })

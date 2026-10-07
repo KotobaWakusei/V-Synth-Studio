@@ -14,7 +14,14 @@
 //! | 随包可执行文件 / 动态库 | ffmpeg / yt-dlp / LibreSVIP / onnxruntime | 在 `tools/` 下；前两个允许退回系统 PATH |
 //! | 下载物 + 随包物两层 | GAME 模型 | 可写目录优先，随包目录兜底 |
 //! | 随包只读数据 | pinyin.json / resources.json | 只在 `<root>/data/` |
-//! | CDN 下载物 | svsep 运行时 / svsep 模型 | 落可写目录，运行期点按钮才下 |
+//! | CDN 下载物 | svsep 运行时 / svsep 模型 / GAME 模型 | 落**扩展包目录**，点按钮才下 |
+//!
+//! ## 扩展包目录（`Base::Ext`）
+//!
+//! 「点按钮下下来的那几个包」全部落在一个**可配置**的根下（`config.json` 的 `extDir`）：
+//! 合计约 8 GB，装在 C 盘紧张的人身上是灾难，所以给用户一个「换个盘」的入口。
+//! 没配置时它就是**可写目录** —— 也就是这一条改动之前的行为，老用户的文件一个都不用搬。
+//! 相对路径按各产物自己那套走（`svsep/`、`game/models/`），因为它们各自还要再分子目录。
 //!
 //! ## 三个**真实例外**，别硬塞进「通用形状」
 //!
@@ -38,6 +45,7 @@
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde_json::{Value, json};
 
@@ -47,8 +55,8 @@ use crate::tools::{dll, exe};
 
 /// 查询上下文。产物的位置全部由这几个目录推出来。
 ///
-/// ⚠️ `svsep`（音轨分离运行时根）是**显式带进来的**，不在这里去查那个全局。
-/// 读全局会让这一层变成不可单测的（测试要改全局，并行跑就互相踩），
+/// ⚠️ `svsep`（音轨分离运行时根）与 `ext`（扩展包根）都是**显式带进来的**，
+/// 不在这里去查那个全局。读全局会让这一层变成不可单测的（测试要改全局，并行跑就互相踩），
 /// 也会让「同一个 ctx 两次查询得不同结果」这种诡异现象变得可能。
 #[derive(Clone)]
 pub struct Ctx<'a> {
@@ -56,37 +64,43 @@ pub struct Ctx<'a> {
     pub root: &'a Path,
     /// 可写目录（绿色版 = `<root>/data`，安装版 = `%APPDATA%\<id>`）
     pub writable: &'a Path,
-    /// 音轨分离的运行时根（用户可配置、绿色版与安装版不同，见模块头「真实例外 2」）
+    /// 音轨分离的运行时根（见模块头「真实例外 2」）
     pub svsep: Cow<'a, Path>,
+    /// 扩展包根（`extDir`；没配置时等于 `writable`，见模块头那一段）。
+    /// 所有权在这边：调用方传进来的多半是一个**刚算出来的**路径。
+    pub ext: PathBuf,
 }
 
 impl<'a> Ctx<'a> {
-    /// 常规入口：svsep 基准取这一次运行真正用的那一个。
+    /// 常规入口：svsep 基准与扩展包根都取这一次运行真正用的那一个。
     ///
-    /// 只有用到 `Base::Svsep` 的产物（音轨分离运行时、onnxruntime）才依赖它。
+    /// 只有用到 `Base::Svsep` / `Base::Ext` 的产物才依赖它们。
     pub fn new(root: &'a Path, writable: &'a Path) -> Self {
         Self {
             root,
             writable,
-            svsep: Cow::Owned(crate::svsep::runtime_base(root)),
+            svsep: Cow::Owned(crate::svsep::runtime_base(&ext_of(writable))),
+            ext: ext_of(writable),
         }
     }
 
-    /// 指定 svsep 基准。单测用，或调用方**已经知道**那个目录时用（省一次全局查询）。
-    pub fn with_svsep(root: &'a Path, writable: &'a Path, svsep: &'a Path) -> Self {
+    /// 指定 svsep 基准与扩展包根。单测用，或调用方**已经知道**那两个目录时用。
+    pub fn with_dirs(root: &'a Path, writable: &'a Path, svsep: &'a Path, ext: &Path) -> Self {
         Self {
             root,
             writable,
             svsep: Cow::Borrowed(svsep),
+            ext: ext.to_path_buf(),
         }
     }
 
-    /// 只关心 `Base::Root` 下的产物时用（`writable` / `svsep` 都不会被查到）。
+    /// 只关心 `Base::Root` 下的产物时用（`writable` / `svsep` / `ext` 都不会被查到）。
     pub fn root_only(root: &'a Path) -> Self {
         Self {
             root,
             writable: root,
             svsep: Cow::Owned(PathBuf::new()),
+            ext: PathBuf::new(),
         }
     }
 }
@@ -98,8 +112,10 @@ pub enum Base {
     Root,
     /// `<可写目录>`
     Writable,
-    /// 音轨分离的运行时根（用户可配置，见上面「真实例外 2」）
+    /// 音轨分离的运行时根（见模块头「真实例外 2」）
     Svsep,
+    /// 扩展包根（`extDir`；没配置时等于可写目录）
+    Ext,
 }
 
 /// 一个候选目录：基准 + 相对路径。
@@ -172,6 +188,31 @@ pub struct Artifact {
     pub need: &'static [FileNeed],
     /// 随包副本不齐时，去系统 PATH 里按这些名字找。空 = 不做 PATH 兜底。
     pub path_names: &'static [&'static str],
+}
+
+/// 扩展包根：用户选过就听用户的，没选过就是可写目录。
+///
+/// ⚠️ 只收 `writable`：`extDir` 是一个**绝对路径**（多在半块盘上），
+/// 相对谁都不对；而默认值就是可写目录本身，所以 `root` 在这里没有任何作用。
+pub fn ext_of(writable: &Path) -> PathBuf {
+    EXT_BASE
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(|| writable.to_path_buf())
+}
+
+/// 用户选定的扩展包根（`None` = 没选过，按可写目录）。进程级一份，启动时定。
+static EXT_BASE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// 定下这一次运行要用哪个扩展包根。**启动时调一次**，改设置时再调一次。
+///
+/// 空串 / 只有空格 = 回到可写目录（也就是这一条改动之前的行为）。
+pub fn init_ext_base(configured: &str) {
+    let p = configured.trim();
+    if let Ok(mut g) = EXT_BASE.lock() {
+        *g = (!p.is_empty()).then(|| PathBuf::from(p));
+    }
 }
 
 /* ══════════════════════════════ 唯一的表 ══════════════════════════════ */
@@ -330,10 +371,12 @@ static ARTIFACTS: &[Artifact] = &[
         id: "game.models",
         label: "扒谱模型（GAME）",
         /* ⚠️ 判层只能比**绝对路径**：绿色版 `writable == <root>/data`，
-        两层是同一个路径，「下载物」与「随包物」在那台机器上分不开。 */
+        两层是同一个路径，「下载物」与「随包物」在那台机器上分不开。
+        ⚠️ 第一层是**扩展包根**而不是可写目录：用户把扩展包换到别的盘时，
+        这一层要跟着走（`extDir` 没配置时两者本就是同一个路径）。 */
         places: &[
             Place {
-                base: Base::Writable,
+                base: Base::Ext,
                 rel: "game/models",
             },
             Place {
@@ -454,6 +497,7 @@ fn base_dir(ctx: &Ctx<'_>, base: Base) -> PathBuf {
         Base::Root => ctx.root.to_path_buf(),
         Base::Writable => ctx.writable.to_path_buf(),
         Base::Svsep => ctx.svsep.to_path_buf(),
+        Base::Ext => ctx.ext.clone(),
     }
 }
 
@@ -637,7 +681,7 @@ pub fn ready(ctx: &Ctx<'_>, a: &Artifact) -> bool {
  * 上面那套 API 收 `&Artifact`，调用方得自己 `get(id).expect(…)` —— 一行变五行。
  * 下面这几个直接收 `&str`，让调用点写成一行：
  *
- *     let dir = artifact::dest_of(root, writable, "svsep.models");
+ *     let dir = artifact::dir_of(root, writable, "game.models");
  *
  * ⚠️ 每一个都**不做兜底**：id 写错就 panic。这是有意的 —— id 都是编译期字面量，
  * 拼错了是程序 bug，而静默回一个空路径会让「产物没装」与「代码写错」混成一种，

@@ -11,6 +11,7 @@ import {JobStatusChip} from '@/components/Job'
 import {Field, TextInput} from '@/components/Field'
 import {DirectoryInput} from '@/components/DirPicker'
 import {baseName, dirName, errText, formatBytes} from '@/lib/format'
+import {askExtDirOnce, ExtDirAsk} from '@/lib/extDir'
 import {useStatusPoll} from '@/lib/polling'
 import {downloadBytes, installLabel, type InstallStep, useInstaller} from '@/lib/useInstaller'
 import {useJob} from '@/lib/useJob'
@@ -321,12 +322,15 @@ export function Midi({onToast, onNavigate}: PageProps) {
      * 「一键装」：一颗按钮把还缺的包按顺序下完（状态机在 `lib/useInstaller.ts`）。
      * ⚠️ 这边**没有暂停**：这两个包不支持续传（停下就是重来），后端也刻意没给
      * 「继续下载」这个动作 —— 所以进度条下只留「停止下载」。
+     * ⚠️ 开装之前问一次**扩展包落点**：模型与音轨分离的那几个包落在同一个根下
+     * （约 8 GB），两个页面共用 `lib/extDir.tsx` 那一问。
      */
     const installer = useInstaller<MidiStatus>({
         load: refresh,
         plan,
         download: (s) => s.download,
         onToast,
+        beforeInstall: askExtDirOnce,
     })
 
     /* 空闲时慢轮询：这一页的状态只有「装没装齐 / 下到多少 / 有没有任务」，
@@ -627,12 +631,12 @@ export function Midi({onToast, onNavigate}: PageProps) {
                         （`status.device.cuda`）—— 别按 `navigator` 或显卡名字猜：
                         真正的判据是「后端建得出一个 CUDA 会话」，只有后端探得到，
                         而猜错的方向恰好是最坏的那个（放出格子 → 跑起来才发现不行）。
-                        ⛔ 这里**不能套 `<Field>{t("`**：它是个 `")}<label>`，而控件里面是
+                        ⛔ 这里**不能套 `<Field>`**：它是个 `<label>`，而控件里面是
                         `<input type="radio">` —— 点标签上任意一处（包括下面那行说明）
                         都会激活第一个单选项，等于悄悄把推理方式改回「自动」。 */}
                     <div className="field">
                         <span className="field-label">{t("推理方式")}</span>
-                        {/* 禁用只加在 `<input type="radio">{t("` 上，外层 `")}<label class="lg-segment">`
+                        {/* 禁用只加在 `<input type="radio">` 上，外层 `<label class="lg-segment">`
                             照样收得到点击，所以「点了给提示、但不选中」要在**捕获阶段**做。
                             ⛔ 别给这个容器加 `pointer-events: none` 来表达禁用 —— 那就成了
                             点了毫无反应，而这正是用户会来报的那个问题。 */}
@@ -907,6 +911,10 @@ export function Midi({onToast, onNavigate}: PageProps) {
                         </div>
                     )}
                 </Panel>
+
+                {/* 装模型之前问一次落点 —— 与音轨分离页、设置页那一问是同一件事
+                    （模型和那几个包落在同一个扩展包根下），实现只有一处。 */}
+                <ExtDirAsk/>
             </div>
         </div>
     )

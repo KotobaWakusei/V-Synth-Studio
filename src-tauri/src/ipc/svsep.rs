@@ -95,16 +95,16 @@ fn note_progress(got: u64, total: Option<u64>, stage: crate::svsep::Stage) {
 /// ⚠️ **这个记忆只在内存里，重启就没了** —— 而盘上那半个包还在。所以「能不能
 /// 接着下」的判据不看它，看盘（`svsep.rs::resume_point`，旁边那个 `.part.url`
 /// 记号才是持久的出处）；这里只是把盘上的结论翻成 `DownloadCtl` 要的形状。
-fn resume_for(
-    kind: &str,
-    root: &std::path::Path,
-    writable: &std::path::Path,
-    url: &str,
-) -> Option<String> {
-    crate::svsep::resume_point(root, writable, kind, url).map(|_| url.to_string())
+fn resume_for(kind: &str, ext: &std::path::Path, url: &str) -> Option<String> {
+    crate::svsep::resume_point(ext, kind, url).map(|_| url.to_string())
 }
 
-fn download_state(root: &std::path::Path, writable: &std::path::Path) -> Value {
+/// 这一次运行要用的扩展包根。**命令层一律从这里取**，别自己拼可写目录。
+fn ext_dir(st: &super::AppState) -> std::path::PathBuf {
+    crate::artifact::ext_of(&st.writable)
+}
+
+fn download_state(ext: &std::path::Path) -> Value {
     let active = DL_ACTIVE.load(Ordering::Relaxed) == 1;
     let err = DL_ERROR.lock().ok().and_then(|e| e.clone());
     let kind = DL_KIND.lock().ok().and_then(|k| *k);
@@ -119,7 +119,7 @@ fn download_state(root: &std::path::Path, writable: &std::path::Path) -> Value {
         } else {
             crate::svsep::model_url()
         };
-        crate::svsep::resume_point(root, writable, k, &url).map(|n| (*k, n))
+        crate::svsep::resume_point(ext, k, &url).map(|n| (*k, n))
     });
     let (paused_kind, paused_bytes) = match paused {
         Some((k, n)) => (Some(k), n),
@@ -214,6 +214,7 @@ where
 #[tauri::command]
 pub async fn svsep_status(st: super::St<'_>) -> Cmd {
     let s = &st.inner().svsep;
+    let ext = ext_dir(st.inner());
     let running = s.probe().await;
     Ok(json!({
         "runtimeReady": s.runtime_ready(),
@@ -221,20 +222,22 @@ pub async fn svsep_status(st: super::St<'_>) -> Cmd {
         "modelsDir": s.models().to_string_lossy(),
         "dataDir": s.data().to_string_lossy(),
         "outputsDir": s.outputs().to_string_lossy(),
-        "runtime": crate::svsep::runtime_status(&st.inner().root),
-        "models": crate::svsep::models_status(s.writable()),
+        // 扩展包根：界面上「这些 GB 都下到哪儿去了」要有个地方说
+        "extDir": crate::platform::clean_path(&ext),
+        "runtime": crate::svsep::runtime_status(&ext),
+        "models": crate::svsep::models_status(&ext),
         "dml": {
             /* 显卡加速包（A 卡 / Intel 核显用的 DirectML）。
                `installed` = 包装没装；`active` = 那份 ORT 是不是真的排在
                `site-packages` 前面（见 `svsep::set_dml_active`）。
                `nvidia` 给界面用来解释「为什么自动模式没开」。 */
-            "installed": crate::svsep::dml_installed(&st.inner().root),
-            "active": crate::svsep::dml_active(&st.inner().root),
+            "installed": crate::svsep::dml_installed(&ext),
+            "active": crate::svsep::dml_active(&ext),
             "nvidia": crate::svsep::nvidia_present(),
-            "dir": crate::platform::clean_path(&crate::svsep::dml_site_dir(&st.inner().root)),
+            "dir": crate::platform::clean_path(&crate::svsep::dml_site_dir(&ext)),
             "zipBytes": crate::svsep::DML_BYTES,
         },
-        "download": download_state(&st.inner().root, s.writable()),
+        "download": download_state(&ext),
         "running": running,
         "port": s.port_hint(),
         "baseUrl": s.base_url(),
@@ -278,18 +281,17 @@ pub async fn svsep_stop(st: super::St<'_>) -> Cmd {
 /// `.part` 删掉）。
 #[tauri::command]
 pub async fn svsep_models_download(st: super::St<'_>) -> Cmd {
-    let writable = st.inner().svsep.writable().to_path_buf();
-    let root = st.inner().root.clone();
+    let ext = ext_dir(st.inner());
     let url = crate::svsep::model_url();
-    let resume = resume_for("models", &root, &writable, &url);
+    let resume = resume_for("models", &ext, &url);
     spawn_download("models", async move {
         let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, resume);
-        let out = crate::svsep::download_models(&writable, &url, &ctl, note_progress).await;
+        let out = crate::svsep::download_models(&ext, &url, &ctl, note_progress).await;
         // 暂停了就留着记号（下次接着下要用）；下完 / 停止 / 出错都不用留。
         // ⚠️ 「下完」到底是哪一种要现查 —— `ctl.paused()` 只有暂停为真，但它
         //    分不出 Done 与 Cancelled，所以这里再问一次盘上的 `.part` 还在不在。
-        if crate::svsep::resume_point(&root, &writable, "models", &url).is_none() {
-            crate::svsep::clear_resume_marker(&root, &writable, "models");
+        if crate::svsep::resume_point(&ext, "models", &url).is_none() {
+            crate::svsep::clear_resume_marker(&ext, "models");
         }
         out
     })
@@ -297,114 +299,120 @@ pub async fn svsep_models_download(st: super::St<'_>) -> Cmd {
 
 /// 下运行时（几 GB，只该下一次）。
 ///
-/// ⚠️ 它解到 [`crate::svsep::runtime_base`] —— **不一定**是程序目录：
-///  · 绿色版 = `<root>/data/svsep/`（默认落点）；
-///  · 安装版 = `<可写>/svsep`（`%APPDATA%\…\svsep`），因为程序目录在
-///    `Program Files` 下**只读**，往那儿解 7.4 GB 必然「建目录失败」；
-///  · 用户在界面上另选了目录就听用户的（C 盘紧张的人把这几 GB 放 D 盘）。
+/// ⚠️ 它解到 [`crate::svsep::runtime_base`]，也就是**扩展包根下的 `svsep/`**：
+///  · 默认（`extDir` 没配置）= 可写目录（绿色版 `<root>/data`、安装版 `%APPDATA%`）——
+///    安装版绝不能往 `Program Files` 解 7.4 GB，那里只读；
+///  · 用户在界面上选过就听用户的（C 盘紧张的人把这几 GB 放 D 盘）。
 /// `python.exe` 与 `backend/` 必须待在一起，所以它俩跟着一起走。
 #[tauri::command]
 pub async fn svsep_runtime_download(st: super::St<'_>) -> Cmd {
     require_local_engine()?;
-    let root = st.inner().root.clone();
-    let writable = st.inner().svsep.writable().to_path_buf();
+    let ext = ext_dir(st.inner());
     let url = crate::svsep::runtime_url();
-    let resume = resume_for("runtime", &root, &writable, &url);
-    let root2 = root.clone();
-    let writable2 = writable.clone();
+    let resume = resume_for("runtime", &ext, &url);
+    let ext2 = ext.clone();
     spawn_download("runtime", async move {
         let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, resume);
-        let out = crate::svsep::download_runtime(&root2, &url, &ctl, note_progress).await;
-        if crate::svsep::resume_point(&root2, &writable2, "runtime", &url).is_none() {
-            crate::svsep::clear_resume_marker(&root2, &writable2, "runtime");
+        let out = crate::svsep::download_runtime(&ext2, &url, &ctl, note_progress).await;
+        if crate::svsep::resume_point(&ext2, "runtime", &url).is_none() {
+            crate::svsep::clear_resume_marker(&ext2, "runtime");
         }
         out
     })
 }
 
-/* ══════════════════════════ 运行时的落点（用户可选） ══════════════════════════ */
+/* ══════════════════════════ 扩展包目录（用户可选） ══════════════════════════ */
 
-/// 运行时落点的现状。
+/// 目录能不能真写进去。
 ///
-/// 界面拿它显示「装在哪」，并据此决定要不要提醒「程序目录不可写，换个目录」。
-fn runtime_dir_info(st: &super::AppState) -> Value {
-    let active = crate::svsep::runtime_base(&st.root);
-    let legacy = crate::svsep::runtime_dir(&st.root);
-    // 真写一下才算数：安装版在 Program Files 下 create_dir_all 会失败
-    let root_dir = st.root.join("data");
-    let root_writable = match std::fs::create_dir_all(&root_dir) {
-        Ok(()) => {
-            let probe = root_dir.join(".vss-write-probe");
-            let ok = std::fs::write(&probe, b"ok").is_ok();
-            let _ = std::fs::remove_file(&probe);
-            ok
-        }
-        Err(_) => false,
-    };
+/// 只 `create_dir_all` 不够：只读盘、受控文件夹都能把空目录建出来，
+/// 写第一个文件时才 Access Denied —— 而那已经是解压到一半之后了。
+fn writable_probe(dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败（{}）：{e}", dir.to_string_lossy()))?;
+    let probe = dir.join(".vss-write-probe");
+    std::fs::write(&probe, b"ok")
+        .map_err(|e| format!("这个目录写不进去（{}）：{e}", dir.to_string_lossy()))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
+/// 扩展包目录的现状。
+///
+/// 界面拿它回答两个问题：「这些 GB 现在落在哪」与「默认会落在哪（以及那块盘还剩多少）」。
+fn ext_dir_info(st: &super::AppState) -> Value {
+    let active = ext_dir(st);
+    let default = st.writable.clone();
     json!({
         "dir": crate::platform::clean_path(&active),
+        // 用户没选过 = 正在用可写目录（界面的「默认位置」就是这个意思）
+        "isDefault": active == default,
+        "defaultDir": crate::platform::clean_path(&default),
+        /* 安装版的可写目录在 `%APPDATA%`（C 盘），而扩展包合计约 8 GB ——
+           界面据此提醒一句「C 盘紧张就把它们放到别的盘」。 */
         "installed": st.installed,
-        /* 程序目录能不能写。安装版（Program Files）是 false ——
-           **界面必须提一句**，否则用户点了下载只看到一句「建目录失败」。 */
-        "rootWritable": root_writable,
-        /* 安装版建议落点 / 用户没选过时的默认 */
-        "writableDefault": crate::platform::clean_path(&st.writable.join("svsep")),
-        "hasRuntime": crate::svsep::runtime_ready(&st.root),
-        /* 换过目录之后前一个落点可能**还留着一份 7 GB**（我们不搬文件，见下）。
+        "hasRuntime": crate::svsep::runtime_ready(&active),
+        /* 换过目录之后老位置可能**还留着一整份 7 GB**（我们不搬文件，见 `ext_set_dir`）。
            给界面一个「原位置还有一份」的提示，删不删用户自己定。 */
-        "legacyDir": if active == legacy { Value::Null } else { json!(crate::platform::clean_path(&legacy)) },
+        "legacyDir": st
+            .config_snapshot()
+            .get("extDir")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty() && std::path::Path::new(s.trim()) != active)
+            .map(|s| crate::platform::clean_path(std::path::Path::new(s.trim()))),
     })
 }
 
-/// 问：运行时现在装在哪、默认会装到哪。
+/// 问：扩展包装在哪、默认会装到哪。
 #[tauri::command]
-pub async fn svsep_runtime_dir(st: super::St<'_>) -> Cmd {
-    Ok(runtime_dir_info(&st))
+pub async fn ext_dir_get(st_: super::St<'_>) -> Cmd {
+    Ok(ext_dir_info(&st_))
 }
 
-/// 换一个运行时落点。
+/// 换一个扩展包目录。
 ///
-/// **只改配置 + 立刻生效，不搬文件** —— 7.4 GB 搬到一半失败比不动更糟。
-/// 原落点里那份原地留着，`runtime_dir_info().legacyDir` 会告诉界面它在哪，
-/// 删不删由用户决定（`svsep_deps_delete` 只删当前这一份）。
+/// **只改配置 + 立刻生效，不搬文件** —— 8 GB 搬到一半失败比不动更糟：用户会得到
+/// 一个「两处各有一半」的状态，而界面还得去猜哪一份算数。原位置里那份原地留着，
+/// `ext_dir_info().legacyDir` 会告诉界面它在哪。
+///
+/// `dir` 传空串 = 回到默认（可写目录）。
 #[tauri::command]
-pub async fn svsep_set_runtime_dir(st: super::St<'_>, dir: String) -> Cmd {
+pub async fn ext_dir_set(st_: super::St<'_>, dir: String) -> Cmd {
     if DL_ACTIVE.load(Ordering::Relaxed) == 1 {
         return Err("正在下载，先暂停或停止再换目录".into());
     }
     if DEL_ACTIVE.load(Ordering::Relaxed) {
         return Err("正在删除依赖，等它删完".into());
     }
-    if st.inner().svsep.probe().await {
+    if st_.inner().svsep.probe().await {
         return Err("分离服务正跑着，先停掉再换目录".into());
     }
     let raw = dir.trim().to_string();
     if !raw.is_empty() {
-        let p = std::path::Path::new(&raw);
-        std::fs::create_dir_all(p)
-            .map_err(|e| format!("建目录失败（{}）：{e}", p.to_string_lossy()))?;
-        // 空目录建得出来不等于写得进去（只读盘、受控文件夹都这样），真落一个探针文件
-        let probe = p.join(".vss-write-probe");
-        std::fs::write(&probe, b"ok")
-            .map_err(|e| format!("这个目录写不进去（{}）：{e}", p.to_string_lossy()))?;
-        let _ = std::fs::remove_file(&probe);
+        writable_probe(std::path::Path::new(&raw))?;
     }
-    let mut cfg = st.config_snapshot();
+    let mut cfg = st_.config_snapshot();
     let Some(map) = cfg.as_object_mut() else {
         return Err("配置文件坏了（不是一个 JSON 对象）".into());
     };
+    map.insert("extDir".to_string(), json!(raw));
+    /* ⚠️ `svsepRuntimeDir` 一并落到同一个值：它是老键，启动时**优先于** `extDir`
+       （见 `AppState::new`），留着旧值会让「刚换的目录」下次启动又跳回去。 */
     map.insert("svsepRuntimeDir".to_string(), json!(raw));
-    super::config_file::save_config(&st.writable, &cfg)
+    super::config_file::save_config(&st_.writable, &cfg)
         .map_err(|e| format!("保存配置失败：{e}"))?;
-    if let Ok(mut g) = st.config.lock() {
+    if let Ok(mut g) = st_.config.lock() {
         *g = cfg;
     }
-    crate::svsep::init_runtime_base(&st.root, &st.writable, st.installed, &raw);
+    crate::artifact::init_ext_base(&raw);
+    let active = ext_dir(st_.inner());
+    /* ⚠️ 扩展包目录一换，`svsep/` 下面就没有随包分发的 `backend/` 与 `bin/` 了
+       （它们不随 zip 下载），所以这里立刻补一份过去。 */
+    let staged = crate::svsep::stage_runtime_assets(&st_.root.join("data").join("svsep"), &active);
     crate::log_line(&format!(
-        "音轨分离运行时的落点改成：{}",
-        crate::platform::clean_path(&crate::svsep::runtime_base(&st.root))
+        "扩展包目录改成：{}（补进 {staged} 个随包文件）",
+        crate::platform::clean_path(&active)
     ));
-    Ok(runtime_dir_info(&st))
+    Ok(ext_dir_info(&st_))
 }
 
 /* ══════════════════════ 显卡加速（DirectML：A 卡 / 核显） ══════════════════════ */
@@ -438,8 +446,7 @@ fn start_dml_download(st: &Arc<super::AppState>) -> Result<Value, String> {
         DL_ACTIVE.store(0, Ordering::Release);
         return Err("正在删除依赖文件，等它删完再下".into());
     }
-    let root = st.root.clone();
-    let state = Arc::clone(st);
+    let ext = ext_dir(st);
     if let Ok(mut k) = DL_KIND.lock() {
         *k = Some("dml");
     }
@@ -456,9 +463,9 @@ fn start_dml_download(st: &Arc<super::AppState>) -> Result<Value, String> {
     这里自己收尾 —— 但**进度仍然写同一组 `DL_*`**，界面不用学第二套。 */
     tokio::spawn(async move {
         let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, None);
-        let res = crate::svsep::download_dml(&root, &ctl, note_progress).await;
+        let res = crate::svsep::download_dml(&ext, &ctl, note_progress).await;
         if res.is_ok() {
-            crate::svsep::apply_infer_mode(&root, &state.svsep.data());
+            crate::svsep::apply_infer_mode(&ext);
         }
         DL_ACTIVE.store(0, Ordering::Relaxed);
         if let Ok(mut k) = DL_KIND.lock() {
@@ -511,7 +518,6 @@ pub async fn svsep_deps_delete(st: super::St<'_>) -> Cmd {
         st.inner().svsep.stop();
     }
 
-    let root = st.inner().root.clone();
     let writable = st.inner().svsep.writable().to_path_buf();
     DEL_BYTES.store(0, Ordering::Relaxed);
     DEL_FILES.store(0, Ordering::Relaxed);
@@ -521,7 +527,6 @@ pub async fn svsep_deps_delete(st: super::St<'_>) -> Cmd {
         // （用户这时能按的唯一一个停止按钮就是它）。
         let res = tokio::task::spawn_blocking(move || {
             crate::svsep::delete_dependencies(
-                &root,
                 &writable,
                 || DL_STOP.load(Ordering::Relaxed),
                 |files, bytes| {
@@ -781,17 +786,15 @@ pub async fn svsep_set_inference(st: super::St<'_>, mode: String) -> Cmd {
         return Err(format!("无效模式：{mode}（只能是 auto / cpu / gpu）"));
     }
     let mode = crate::svsep::normalize_infer_mode(&raw);
-    crate::svsep::write_infer_mode(&st.inner().svsep.data(), &mode)?;
-    crate::svsep::apply_infer_mode(&st.inner().root, &st.inner().svsep.data());
+    let ext = ext_dir(st.inner());
+    crate::svsep::write_infer_mode(&ext, &mode)?;
+    crate::svsep::apply_infer_mode(&ext);
 
     /* 选了 GPU 但加速包还没下（A 卡 / 核显）→ 顺手开始下：24 MB，界面上有现成的
        进度条（`dl.kind == "dml"`）。N 卡不需要它（那份 CUDA 在运行时里）。
        ⚠️ 失败不阻断：设置已经存下来了，下不动只是这次没生效。 */
     let mut dml_downloading = false;
-    if mode == "gpu"
-        && !crate::svsep::nvidia_present()
-        && !crate::svsep::dml_installed(&st.inner().root)
-    {
+    if mode == "gpu" && !crate::svsep::nvidia_present() && !crate::svsep::dml_installed(&ext) {
         dml_downloading = start_dml_download(st.inner()).is_ok();
     }
 

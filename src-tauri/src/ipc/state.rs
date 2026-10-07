@@ -62,6 +62,11 @@ pub struct AppState {
     pub installed: bool,
     /// 配置
     pub config: Mutex<Value>,
+    /// **上一个**扩展包目录（`extDir` 被改之前的那个）。
+    ///
+    /// 只有升级清理用它：老落点里可能留着几 GB 的半个包，而那些文件不会再被任何人
+    /// 认领（见 `crate::upgrade`）。`None` = 没换过。
+    pub previous_ext_dir: Option<PathBuf>,
     /// 任务表
     pub jobs: Mutex<JobTable>,
     /// 离线音轨分离服务（Python 子进程）。见 `crate::svsep`。
@@ -80,31 +85,63 @@ pub struct AppState {
 /// （`tools_detect` 走 `probe_cached(true)` 绕过缓存）。
 const PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 配置里选定的扩展包目录（空串 = 没选过，用可写目录）。
+///
+/// ⚠️ **老键 `svsepRuntimeDir` 优先**：它是上一版用户显式选过的音轨分离落点，
+/// 而 `extDir` 是本版新加的键 —— 只认后者会把老用户那 7.4 GB 判成「没装」。
+fn ext_dir_setting(config: &Value) -> String {
+    config
+        .get("extDir")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            config
+                .get("svsepRuntimeDir")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 impl AppState {
     pub fn new(paths: crate::AppPaths) -> Arc<Self> {
         // 可写目录可能还不存在（首次运行安装版），先建出来
         let _ = std::fs::create_dir_all(&paths.writable);
-        let config = super::config_file::load_config(&paths.writable);
-        /* 运行时落点要在建 `Svsep` **之前**定下来 —— `runtime_base()` 是进程级的，
-        凡是拼运行时路径的地方都读它（见那个函数的注释）。
-        ⚠️ 安装版默认落点是程序目录 = `Program Files` = 普通权限写不进去，
-        4.7 GB 解压必然失败 —— MSI 用户「音轨分离用不了」有这一半原因。 */
-        crate::svsep::init_runtime_base(
-            &paths.root,
-            &paths.writable,
-            paths.installed,
-            config
-                .get("svsepRuntimeDir")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        );
+        let mut config = super::config_file::load_config(&paths.writable);
+        /* 老版本的单开键（`svsepRuntimeDir`）收敛到 `extDir` 上，之后只认后者 ——
+        两个键同时活着会让「设置页显示 A、实际落 B」这种鬼状态出现。
+        ⚠️ 改了就立刻落盘：不落的话下次启动又得按老键再推一遍，而那时用户可能已经在
+        界面上选了新的目录，两边的值就再也对不上了。 */
+        let mut migrated = config.clone();
+        if crate::upgrade::migrate_config(&mut migrated)
+            && super::config_file::save_config(&paths.writable, &migrated).is_ok()
+        {
+            config = migrated;
+        }
+        /* 扩展包根必须在**任何人拼产物路径之前**定下来 —— 音轨分离的运行时与模型、
+        人声转 MIDI 的 GAME 模型全都从它推出来（见 `crate::artifact` 的模块头）。
+        ⚠️ 老配置里那个单独的 `svsepRuntimeDir` 仍然压过 `extDir`：它是用户显式选过的
+        音轨分离落点，而 `extDir` 是本版新加的键 —— 只认后者会把老用户那 7.4 GB
+        判成「没装」，界面立刻摆出一个「再下一遍」的按钮。 */
+        let configured = ext_dir_setting(&config);
+        crate::artifact::init_ext_base(&configured);
+        let ext = crate::artifact::ext_of(&paths.writable);
+        /* 上一版留下的那个落点（只有一个，且与本版生效的不是同一个目录时才存在）：
+        升级前用户可能只填过老键，也可能只填过 `extDir`，两边都要算候选 —— 老落点里
+        那几 GB 的半个包不会再被任何人认领，正是 `upgrade::cleanup` 要清的。 */
+        let previous_ext_dir = ["extDir", "svsepRuntimeDir"]
+            .iter()
+            .filter_map(|k| config.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .find(|p| *p != ext);
         /* 加速包（DirectML）按**推理方式**生效：改 `._pth` 里那一行、并复位六轨补丁。
-        ⚠️ 必须在 `init_runtime_base` **之后** —— 那两个文件都在运行时目录里，
-        而运行时目录刚刚才定下来。 */
-        let svsep_data = crate::svsep::data_dir(&paths.root, &paths.writable, paths.installed);
-        crate::svsep::apply_infer_mode(&paths.root, &svsep_data);
-        let svsep =
-            crate::svsep::Svsep::new(paths.root.clone(), paths.writable.clone(), paths.installed);
+        ⚠️ 必须在扩展包根定下来**之后** —— 那两个文件都在运行时目录里。 */
+        crate::svsep::apply_infer_mode(&ext);
+        let svsep = crate::svsep::Svsep::new(paths.writable.clone());
         /*
          * ⚠️ 预热**不在这里**做，由调用方（`lib.rs` 的 setup）起线程。本函数在 setup 里
          * 被同步调用，而 setup 跑在主线程上 —— 任何耗时动作都该由调用方显式决定要不要
@@ -115,6 +152,7 @@ impl AppState {
             writable: paths.writable,
             installed: paths.installed,
             config: Mutex::new(config),
+            previous_ext_dir,
             jobs: Mutex::new(JobTable::default()),
             svsep,
             probe_cache: Mutex::new(None),

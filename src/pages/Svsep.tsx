@@ -1,13 +1,14 @@
 import {type RefObject, useCallback, useEffect, useMemo, useRef, useState} from 'react'
-import {api, svsepFileUrl, type SvsepOutput, type SvsepRuntimeDir, type SvsepStatus, type SvsepTask,} from '@/lib/api'
+import {api, svsepFileUrl, type SvsepOutput, type SvsepStatus, type SvsepTask,} from '@/lib/api'
 import {Button, IconButton} from '@/components/Button'
 import {Credit, Upstream} from '@/components/Credit'
 import {Icon} from '@/components/Icon'
 import {Chip, Finding, Panel, PanelHead, ProgressBar, Stat} from '@/components/Panel'
 import {DangerZone, DownloadProgress} from '@/components/Dependency'
 import {JobStatusChip, svsepTaskStatus} from '@/components/Job'
-import {GlassDialog, GlassSegmentedControl} from '@ttqtt/liquid-glass-react'
+import {GlassSegmentedControl} from '@ttqtt/liquid-glass-react'
 import {DropHint, useFilePick} from '@/components/FilePick'
+import {askExtDirOnce, ExtDirAsk} from '@/lib/extDir'
 import {baseName, errText, formatBytes} from '@/lib/format'
 import {POLL_STATUS, useStatusPoll} from '@/lib/polling'
 import {downloadBytes, extractedBytes, installLabel, type InstallStep, useInstaller,} from '@/lib/useInstaller'
@@ -105,14 +106,6 @@ const svsepModelsOk = (s: SvsepStatus) => {
     return items.length > 0 && items.every((m) => m.state === 'ok')
 }
 
-/**
- * 这一次运行里「运行时装哪个目录」已经问过了吗。
- *
- * 放在模块级（不是 ref）：用户要求**这个确认只弹一次** —— ref 会跟着切页卸载而丢掉，
- * 于是「确认完就切走、再回来点安装」会被再问一遍。
- */
-let dirAskedInSession = false
-
 /** 从文件名猜一条轨是什么（上游给的是 `(Vocals)_xxx.wav` 这种） */
 function stemOf(o: SvsepOutput): string {
     if (o.stem) return o.stem
@@ -208,10 +201,6 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
     const [task, setTask] = useState<SvsepTask | null>(null)
     /* 「删除全部依赖」的两段式确认：第一下只是把这个立起来，第二下才真删 */
     const [armDelete, setArmDelete] = useState(false)
-    /* 运行时的落点（装之前只问一次）与那个确认弹窗 */
-    const [dirInfo, setDirInfo] = useState<SvsepRuntimeDir | null>(null)
-    const [dirAsk, setDirAsk] = useState<SvsepRuntimeDir | null>(null)
-    const dirAskResolve = useRef<((ok: boolean) => void) | null>(null)
     /* 六轨（RoFormer）不再提供「也用显卡」的开关：上游说它走 DirectML 容易 OOM，
        而显存不够时是**整个任务失败**（不是退回 CPU）。后端每次都会把那一行复位成
        上游的 False —— 老用户开过的也一并收回去。 */
@@ -275,80 +264,15 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
         [],
     )
 
-    /** 弹一次落点确认，等用户选完（或确认默认）再开始下载 */
-    const askDirOnce = useCallback(async (): Promise<boolean> => {
-        /* 写成「先取、没有再问」而不是 `dirInfo ?? await …`：TS 7 对
-           「`??` 右边是 await」这种写法的收窄跟不过去，会报 `info` 可能是 null。 */
-        let info = dirInfo
-        if (!info) {
-            info = await api.svsepRuntimeDir()
-            setDirInfo(info)
-        }
-        if (info.hasRuntime) {
-            dirAskedInSession = true
-            return true
-        }
-        if (dirAskedInSession) return true
-        return await new Promise<boolean>((resolve) => {
-            dirAskResolve.current = resolve
-            setDirAsk(info)
-        })
-    }, [dirInfo])
-
+    /* 开装之前问一次扩展包落点（共用那一份在 `lib/extDir.tsx`：设置页与 MIDI 页
+       问的是**同一个根**，所以这一问只该有一份实现）。 */
     const installer = useInstaller<SvsepStatus>({
         load: refresh,
         plan,
         download: (s) => s.download,
         onToast,
-        beforeInstall: askDirOnce,
+        beforeInstall: askExtDirOnce,
     })
-
-    /* 落点信息只读一次 —— 装好之后就不用再问了 */
-    useEffect(() => {
-        let on = true
-        void api
-            .svsepRuntimeDir()
-            .then((d) => {
-                if (on) setDirInfo(d)
-            })
-            .catch(() => {
-                /* 读不到就等真点安装时再问一次（`askDirOnce` 自己会拉） */
-            })
-        return () => {
-            on = false
-        }
-    }, [])
-
-    const closeDirAsk = (ok: boolean) => {
-        setDirAsk(null)
-        const r = dirAskResolve.current
-        dirAskResolve.current = null
-        r?.(ok)
-    }
-
-    /** 「用默认位置」= 把配置清回自动（安装版落可写目录、绿色版落程序目录） */
-    const useDefaultDir = async () => {
-        try {
-            setDirInfo(await api.svsepSetRuntimeDir(''))
-            dirAskedInSession = true
-            closeDirAsk(true)
-        } catch (e) {
-            onToast(errText(e), 'err')
-        }
-    }
-
-    /** 「换个目录…」= 系统「选择文件夹」对话框，选完就落在那儿 */
-    const pickRuntimeDir = async () => {
-        try {
-            const r = await api.fsPick({folder: true, title: '选音轨分离运行时的存放目录'})
-            if (!r.files.length) return
-            setDirInfo(await api.svsepSetRuntimeDir(r.files[0]))
-            dirAskedInSession = true
-            closeDirAsk(true)
-        } catch (e) {
-            onToast(errText(e), 'err')
-        }
-    }
 
     /* ── 轮询：状态 ─────────────────────────────────────── */
     /* 安装中由 `useInstaller` 每 1.75 秒拉一次（它拉的也是 `refresh`），这里让开，
@@ -1081,32 +1005,11 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                 </Credit>
 
                 {/* ── 装之前先定落点（**只问一次**）─────────────────────
-            这一坨 7.4 GB 默认解到哪，安装版（程序目录只读）与绿色版不一样，用户
-            也可能想挪到别的盘 —— 所以第一次下载之前问一次，选完/确认完才开始下。
-            ⚠️ 只在**运行时还没装好**时弹（`askDirOnce` 判的），装好之后同一个会话
-            里不再出现。 */}
-                <GlassDialog
-                    open={!!dirAsk && localOk}
-                    onOpenChange={(o) => {
-                        if (!o) closeDirAsk(false)
-                    }}
-                    title={t("选运行时的存放位置")}
-                    description={`要下 ${formatBytes(downloadBytes(st?.runtime))}，解开后占 ${formatBytes(extractedBytes(st?.runtime))}`}
-                >
-                    <p className="hint">默认位置：{dirAsk?.writableDefault}</p>
-                    {dirAsk && !dirAsk.rootWritable && (
-                        <p className="hint">{t("程序目录不可写，所以要另选一个位置。")}</p>
-                    )}
-                    <div className="dir-actions">
-                        <span className="spacer"/>
-                        <Button size="sm" onClick={() => void pickRuntimeDir()}>
-                            换个目录…
-                        </Button>
-                        <Button size="sm" variant="primary" onClick={() => void useDefaultDir()}>
-                            用默认位置
-                        </Button>
-                    </div>
-                </GlassDialog>
+            运行时 7.4 GB + 模型 0.7 GB，默认落在 C 盘的可写目录里；用户可能想挪到
+            别的盘 —— 所以第一次下载之前问一次，选完/确认完才开始下。
+            ⚠️ 这一问与「设置 → 扩展包目录」、以及人声转 MIDI 页那一问**是同一件事**
+            （同一个根），实现只有 `lib/extDir.tsx` 一份 —— 三处各写一遍必然漂开。 */}
+                <ExtDirAsk/>
             </div>
         </div>
     )

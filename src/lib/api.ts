@@ -27,6 +27,16 @@ export const api = {
     saveConfig: (patch: Record<string, unknown>) =>
         call<{ config: Record<string, unknown> }>('set_config', {patch}),
 
+    /* ── 检查更新（GitHub Releases）────────────────────────── */
+    /**
+     * 问一次上游仓库最新那条发布。**只查不装** —— 装不装由用户自己点发布页。
+     *
+     * ⚠️ 「上游还没发过 Release」与「GitHub 匿名调用超额」都是 `ok: false` 的
+     * **正常回包**（各带一句 `error`），不是异常；`hasUpdate` 为 false 也可能是
+     * **本机比远端新**（自编的包），不一定是「一样新」。
+     */
+    updateCheck: () => call<UpdateCheck>('update_check'),
+
     /* ── 音轨分离（内嵌离线引擎）──────────────────────────── */
     /**
      * 状态。页面每 2 秒轮询一次它 —— 服务的生死、模型的多少、下载的进度
@@ -54,14 +64,20 @@ export const api = {
      */
     svsepDownloadRuntime: () => call<{ started: boolean }>('svsep_runtime_download'),
     /**
-     * 运行时现在装在哪、默认会装到哪。
+     * 扩展包现在装在哪、默认会装到哪。
      *
-     * 安装版（装在 `Program Files`）里程序目录**不可写**，那 7.4 GB 解压必然失败 ——
-     * `rootWritable: false` 就是这个情形，所以装之前必须先问一次落点。
+     * 这是「下载时让用户选位置」那一问的数据来源：`dir` 是**当前生效**的根，
+     * `defaultDir` 是「用默认位置」会写进去的那个（可写目录 —— 安装版在 `%APPDATA%`，
+     * 也就是 C 盘，而扩展包合计约 8 GB）。
      */
-    svsepRuntimeDir: () => call<SvsepRuntimeDir>('svsep_runtime_dir'),
-    /** 换运行时落点。**`dir: ""` = 回到自动**（安装版落可写目录、绿色版落程序目录）。 */
-    svsepSetRuntimeDir: (dir: string) => call<SvsepRuntimeDir>('svsep_set_runtime_dir', {dir}),
+    extDirGet: () => call<ExtDirInfo>('ext_dir_get'),
+    /**
+     * 换扩展包目录。**`dir: ""` = 回到默认**（可写目录）。
+     *
+     * ⚠️ 只改配置、**不搬文件**：8 GB 搬到一半失败比不动更糟。原位置里那份原地留着，
+     * 返回的 `legacyDir` 会告诉界面它在哪。
+     */
+    extDirSet: (dir: string) => call<ExtDirInfo>('ext_dir_set', {dir}),
     /**
      * 下显卡加速包（24 MB，A 卡 / Intel 核显用的 DirectML）。
      *
@@ -798,23 +814,23 @@ export interface WeScan {
 }
 
 /**
- * 运行时的落点（`svsep_runtime_dir` / `svsep_set_runtime_dir` 的回包）。
+ * 扩展包目录（`ext_dir_get` / `ext_dir_set` 的回包）。
  *
- * 安装版程序目录只读，那 4.7 GB 下载 + 7.4 GB 解压必须落到别处 —— 所以界面在
- * **第一次下载之前**要拿这份信息问一次用户（见 `Svsep.tsx`）。
+ * 音轨分离的运行时 / 模型、人声转 MIDI 的 GAME 模型全落在它下面，合计约 8 GB ——
+ * 所以界面在**第一次下载之前**要拿这份信息问一次用户（见 `lib/extDir.tsx`）。
  */
-export interface SvsepRuntimeDir {
-    /** 这一次运行真正用的落点 */
+export interface ExtDirInfo {
+    /** 这一次运行真正用的根 */
     dir: string
-    /** 安装版还是绿色版 */
+    /** 正在用的是不是默认位置（可写目录）。`true` 时就是「没选过」 */
+    isDefault: boolean
+    /** 「用默认位置」会写到哪 */
+    defaultDir: string
+    /** 安装版还是绿色版 —— 默认位置在 `%APPDATA%`（C 盘）时值得提醒一句 */
     installed: boolean
-    /** 程序目录可写吗。安装版是 `false`，界面据此说「另选一个位置」 */
-    rootWritable: boolean
-    /** 用户没选过时的默认落点 */
-    writableDefault: string
-    /** 运行时已经装好了吗（`python.exe` 与 `backend/app.py` 都在） */
+    /** 音轨分离的运行时已经装好了吗（`python.exe` 与 `backend/app.py` 都在） */
     hasRuntime: boolean
-    /** 换过落点后老位置可能还留着一份 —— 没换过就是 `null` */
+    /** 换过目录后老位置可能还留着几 GB —— 没换过就是 `null` */
     legacyDir: string | null
 }
 
@@ -971,6 +987,38 @@ export interface MidiStatus {
     device: MidiDevice
     /** 正在跑的那次任务 id；null = 空闲（同时只允许一个） */
     running: string | null
+}
+
+/* ── 检查更新（后端 `update.rs` 拼的回包）─────────────────── */
+
+/**
+ * `update_check` 的回包。
+ *
+ * ⚠️ `ok: false` 是**正常回包**（上游没发过 Release、GitHub 匿名调用超额），
+ * 只有真连不上才走 `Error`；`hasUpdate: false` 也可能是本机比远端新。
+ * 所以除 `ok` 外都是可选的 —— 失败时后端只发 `ok` + `error`。
+ */
+export interface UpdateCheck {
+    ok: boolean
+    /** 失败的原因（后端写好的中文，直接显示） */
+    error?: string
+    /** 本机版本，例如 `1.3.3beta` */
+    current?: string
+    /** 上游最新 tag，已去掉前导 `v` */
+    latest?: string
+    /** 上游比本机新。**本机比上游新时也是 false** */
+    hasUpdate?: boolean
+    /** 发布的标题（可能为空串） */
+    name?: string
+    /** 发布说明（markdown 原文，后端截到 4000 字） */
+    notes?: string
+    /** 发布页地址 */
+    url?: string
+    /** ISO 8601，例如 `2026-08-01T12:00:00Z` */
+    publishedAt?: string
+    prerelease?: boolean
+    /** 那条发布带的附件文件名 */
+    assets?: string[]
 }
 
 /**

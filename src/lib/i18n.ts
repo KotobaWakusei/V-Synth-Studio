@@ -243,6 +243,25 @@ const DICT: Record<string, Record<UiLanguage, string>> = {
   "配置在 ~/Library/Application Support": {"zh-CN":"配置在 ~/Library/Application Support","en-US":"Config lives in ~/Library/Application Support","ja-JP":"設定は ~/Library/Application Support"},
   "减速": {"zh-CN":"减速","en-US":"Slower","ja-JP":"遅く"},
   "原速": {"zh-CN":"原速","en-US":"Original speed","ja-JP":"元の速さ"},
+  /* ── 更新提醒（`update.rs` 的回包 + 启动时那次静默检查） ── */
+  "有新版本": {"zh-CN":"有新版本","en-US":"New version available","ja-JP":"新しいバージョンがあります"},
+  "打开发布页": {"zh-CN":"打开发布页","en-US":"Open release page","ja-JP":"リリースページを開く"},
+  "稍后再说": {"zh-CN":"稍后再说","en-US":"Later","ja-JP":"あとで"},
+  "发布于": {"zh-CN":"发布于","en-US":"Published","ja-JP":"公開"},
+  "（预览版）": {"zh-CN":"（预览版）","en-US":" (pre-release)","ja-JP":"（プレリリース）"},
+  "这条发布没有写说明。": {"zh-CN":"这条发布没有写说明。","en-US":"This release has no notes.","ja-JP":"このリリースには説明がありません。"},
+  "未知日期": {"zh-CN":"未知日期","en-US":"unknown date","ja-JP":"日付不明"},
+  "已经是最新版本": {"zh-CN":"已经是最新版本","en-US":"You are on the latest version","ja-JP":"最新バージョンです"},
+  "上游最新发布": {"zh-CN":"上游最新发布","en-US":"latest upstream release","ja-JP":"上流の最新リリース"},
+  "检查更新": {"zh-CN":"检查更新","en-US":"Check for updates","ja-JP":"更新を確認"},
+  "从 GitHub 的 Release 页查一次最新发布": {"zh-CN":"从 GitHub 的 Release 页查一次最新发布","en-US":"Ask the GitHub release page for the latest version","ja-JP":"GitHubのリリースページに最新版を問い合わせます"},
+  "加速": {"zh-CN":"加速","en-US":"Faster","ja-JP":"速く"},
+  "解析 MV 链接": {"zh-CN":"解析 MV 链接","en-US":"Parse MV link","ja-JP":"MVリンクを解析"},
+  "打开资源库": {"zh-CN":"打开资源库","en-US":"Open resources","ja-JP":"リソースを開く"},
+  "默认位置": {"zh-CN":"默认位置","en-US":"Default location","ja-JP":"既定の場所"},
+  "已自定义": {"zh-CN":"已自定义","en-US":"Customised","ja-JP":"カスタム済み"},
+  "确认新位置能用之后再手动清掉它": {"zh-CN":"确认新位置能用之后再手动清掉它","en-US":"Delete the old one by hand once the new location works","ja-JP":"新しい場所で動作を確認してから、古い方を手動で削除してください"},
+  "这个目录里已经有一份音轨分离运行时。": {"zh-CN":"这个目录里已经有一份音轨分离运行时。","en-US":"This directory already holds a stem-separation runtime.","ja-JP":"このフォルダーには既にステム分離のランタイムがあります。"},
 }
 
 export function getUiLanguage(): UiLanguage {

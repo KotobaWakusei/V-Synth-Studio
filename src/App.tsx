@@ -1,12 +1,12 @@
 import {type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState} from 'react'
-import {api} from '@/lib/api'
+import {api, type UpdateCheck} from '@/lib/api'
 import {getConfig, onConfigError, saveConfig} from '@/lib/config'
 import {useI18n} from '@/lib/i18n'
 import type {AppState} from '@/lib/types'
 import {Icon, type IconName} from '@/components/Icon'
 import {GlassPanel, Panel} from '@/components/Panel'
 import {Button} from '@/components/Button'
-import {BackdropToneProvider, GlassProvider, ScrollEdge, useGlassPolicy,} from '@ttqtt/liquid-glass-react'
+import {BackdropToneProvider, GlassDialog, GlassProvider, ScrollEdge, useGlassPolicy,} from '@ttqtt/liquid-glass-react'
 import {levelMaterial, levelTransparency, useGlassLevel} from '@/lib/useGlass'
 import {useNavLens} from '@/lib/useNavLens'
 import {materialOptions} from '@/components/Glass'
@@ -128,6 +128,31 @@ export default function App() {
     useEffect(() => {
         void refreshState()
     }, [refreshState])
+
+    /*
+     * 启动时**静默**查一次更新：只有「上游真有比本机新的版本」才弹窗，
+     * 其余一概不打扰 —— 连不上 GitHub、上游没发过 Release、本机比远端新（自己编的包）
+     * 全都是「什么都不做」（见 `update.rs`：那几种在回包里是 `ok:false` 或 `hasUpdate:false`）。
+     *
+     * ⚠️ **不 await、不进首屏**：请求由 Rust 那边发（十秒超时），这里 fire-and-forget，
+     * 失败只进控制台。也别给它加 toast —— 那是「提醒」，不是「报错」。
+     */
+    const [update, setUpdate] = useState<UpdateCheck | null>(null)
+    const [updateOpen, setUpdateOpen] = useState(false)
+    useEffect(() => {
+        let alive = true
+        void api
+            .updateCheck()
+            .then((r) => {
+                if (!alive || !r.ok || !r.hasUpdate) return
+                setUpdate(r)
+                setUpdateOpen(true)
+            })
+            .catch((e: unknown) => console.warn('[update] 启动检查更新失败（静默）：', e))
+        return () => {
+            alive = false
+        }
+    }, [])
 
     /* 配置写失败（后端拒绝、盘满…）要说出来，否则用户只会看到「改了没反应」 */
     useEffect(() => {
@@ -291,6 +316,41 @@ export default function App() {
                             </div>
                         </main>
                     </div>
+
+                    {/* 启动那次静默检查**只在真有新版时**把这个框打开（见上面那个 effect）。
+                        「设置 → 关于」里还有一份手动的，两处共用同一个后端命令。 */}
+                    <GlassDialog
+                        open={updateOpen}
+                        onOpenChange={setUpdateOpen}
+                        title={`${t('有新版本')}：${update?.latest ?? ''}`}
+                        description={`${update?.current ?? ''} → ${update?.latest ?? ''}`}
+                    >
+                        {(update?.name || update?.publishedAt || update?.prerelease) && (
+                            <p className="hint">
+                                {update?.name ? `${update.name} · ` : ''}
+                                {update?.publishedAt
+                                    ? `${t('发布于')} ${update.publishedAt.slice(0, 10)}`
+                                    : ''}
+                                {update?.prerelease ? t('（预览版）') : ''}
+                            </p>
+                        )}
+                        <pre className="job-log">{update?.notes || t('这条发布没有写说明。')}</pre>
+                        <div className="btn-row">
+                            <Button
+                                variant="primary"
+                                icon="external"
+                                onClick={() => {
+                                    void api.fsOpen({url: update?.url ?? ''})
+                                    setUpdateOpen(false)
+                                }}
+                            >
+                                {t('打开发布页')}
+                            </Button>
+                            <Button variant="ghost" onClick={() => setUpdateOpen(false)}>
+                                {t('稍后再说')}
+                            </Button>
+                        </div>
+                    </GlassDialog>
 
                     <div className="toasts" aria-live="polite">
                         {toasts.map((t) => (

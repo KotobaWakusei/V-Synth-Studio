@@ -50,7 +50,8 @@
         "type": "downloadBootstrapper"
       },
       "wix": {
-        "language": "zh-CN"
+        "language": "zh-CN",
+        "upgradeCode": "80f95787-88be-52d0-8519-c551ce0418d9"
       }
     },
     "macOS": {
