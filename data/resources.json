@@ -54,10 +54,10 @@
           }
         },
         {
-          "id": "vspx",
-          "name": "vspx.top",
-          "url": "https://vspx.top/",
-          "home": "vspx.top",
+          "id": "vsqx",
+          "name": "vsqx.top",
+          "url": "https://www.vsqx.top/",
+          "home": "vsqx.top",
           "tags": [
             "工程文件",
             "中文站"
@@ -65,8 +65,8 @@
           "region": "国内",
           "cost": "免费",
           "official": true,
-          "desc": "中文的工程分享站。**当前站点无法访问**，先留在这里备查 —— 如果哪天恢复了可以再看看。",
-          "tip": "截至 2026-09-27 实测连接失败。收录时没有校验连通性（用户明确说明该站已挂），不要以本条目为准判断站点状态。",
+          "desc": "中文的工程分享站。",
+          "tip": "截至26/10/07该站仍维护，暂时无法访问",
           "verified": {
             "status": 0,
             "checkedAt": "2026-09-27",
