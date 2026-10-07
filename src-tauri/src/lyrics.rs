@@ -17,12 +17,22 @@
 //!   - 译文按时间戳对齐 / 译文缺失与精度误差的处理思路、纯音乐与空行的判定
 //!     —— Core/Utils/LyricUtils.cs、Core/Models/MusicLyricsVO.cs
 //!
+//! 下载音质与网易云账号这两块**参考了 FusionMusicPlayer**
+//! （<https://github.com/Janson20/FusionMusicPlayer>，GPL-3.0，Copyright (c) Janson20），
+//! 照它的做法自行实现，未拷贝其代码：
+//!   - 下载档位与「逐档往下试」的回退链、静默降级的识别
+//!     —— `Quality` / `Quality::chain` / `level_rank`
+//!   - 落盘前的文件头 + 时长双重校验、`.part` 临时文件
+//!     —— `audio_format` / `duration_mismatch` / `part_path`
+//!   - 会员标签带等级、凭据有效期与临近过期续期、登录态四态划分
+//!     —— `vip_label` / `should_renew` / `refresh_login` / `account_info`
+//!
 //! 接口选择与它不同（也不依赖它的代码）：网易云的明文接口
 //! `/api/cloudsearch/pc`、`/api/song/lyric`、`/api/song/detail` 直接可用，
 //! 用不着 `weapi` 那套 AES + RSA 加密链路。
 //! 短信验证码登录见 `sms_send` / `cellphone_login`，不需要加密。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -60,7 +70,7 @@ fn client(cfg: &Value) -> Result<reqwest::Client, String> {
 ///   含糊的 `error decoding response body`。总超时放宽后仍怕「连上了但不发数据」，
 ///   所以留 60 秒读超时。
 ///
-/// 前端给这个接口的超时也是 5 分钟（`api.ts` 的 `lyricsSong`）。
+/// 前端对这条命令没有超时（`lib/ipc.ts` 约定 3），兜底就是上面这两个值。
 fn media_client(cfg: &Value) -> Result<reqwest::Client, String> {
     let mut builder = base_builder(cfg, 600)?;
     // 60 秒没收到新数据才判死；数据一直在流就不会超时
@@ -345,12 +355,18 @@ async fn netease_search(
     Ok(annotate_playable(client, cookie, hits).await)
 }
 
-/// 给搜索结果逐条标上「这个版本能不能拿到直链」（`playable`）。
+/// 给搜索结果逐条标上「这个版本能不能拿到直链」（`playable`），以及这个账号能拿到的
+/// 最高档（`maxLevel` / `maxBr`）。
 ///
 /// 为什么这里要专门多打一次播放接口：**能不能下与 `fee` 无关**（同为 `fee=0`
 /// 两种结果都有），只有真去打一次才知道。20 条**一次批量请求**就够（`ids` 收
 /// JSON 数组），代价可接受；失败就整体不标（`playable` 留空），
 /// 绝不让「探测失败」变成「搜索结果打不开」。
+///
+/// ⚠️ **必须按最高档探测，不能按某一档**：服务端对够不到的档位是**降级**而不是拒绝
+/// （实测未登录求 `hires/flac` 照样回 `url`，只是 `level` 降到 `exhigh`）。按最高档探
+/// 一次同时得到两个答案：`url` 非空 = 这个版本能下；回包的 `level` = 这个账号的天花板
+/// （随搜索结果一起回给前端，字段是 `maxLevel` / `maxBr`）。
 async fn annotate_playable(
     client: &reqwest::Client,
     cookie: &str,
@@ -364,19 +380,23 @@ async fn annotate_playable(
         .map(|h| s(h, "/id"))
         .collect::<Vec<_>>()
         .join(",");
-    let Ok(list) = fetch_media(client, cookie, &ids).await else {
+    let Ok(list) = fetch_media(client, cookie, &ids, Quality::Hires).await else {
         return hits;
     };
 
     for hit in hits.iter_mut() {
         let id = s(hit, "/id");
-        let playable = list
-            .iter()
-            .find(|x| s(x, "/id") == id)
-            .map(|x| !s(x, "/url").is_empty())
-            .unwrap_or(false);
-        if let Some(obj) = hit.as_object_mut() {
-            obj.insert("playable".to_string(), Value::Bool(playable));
+        let found = list.iter().find(|x| s(x, "/id") == id);
+        let playable = found.map(|x| !s(x, "/url").is_empty()).unwrap_or(false);
+        let Some(obj) = hit.as_object_mut() else {
+            continue;
+        };
+        obj.insert("playable".to_string(), Value::Bool(playable));
+        if playable {
+            if let Some(x) = found {
+                obj.insert("maxLevel".to_string(), json!(s(x, "/level")));
+                obj.insert("maxBr".to_string(), json!(n(x, "/br")));
+            }
         }
     }
     hits
@@ -523,20 +543,119 @@ fn write_file(dest: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(dest, bytes).map_err(|e| format!("写入失败：{e}"))
 }
 
-/// 统一的取直链入口：回包 `data` 那个数组，每项含 `url` / `level` / `br` / `type` /
-/// `code` / `freeTrialPrivilege`。**下载与搜索结果的「能不能下」标注都走这里，参数只此一份。**
+/// 下载档位。**档位是上限，不是承诺**：服务端会静默降级，实际拿到哪一档由回包的
+/// `level` 决定，并如实报给用户。
+///
+/// 实测（未登录、免费歌，`player/url/v1`）：求 `standard` / `higher` / `exhigh` 分别回
+/// 128 / 192 / 320 kbps；求 `lossless` / `hires` **也回 url**，但 `level` 仍写 `exhigh`、
+/// `type` 仍写 `mp3`。所以**只看 `url` 非空会把 320 kbps 当成无损**，必须比对等级。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Quality {
+    /// 不设上限：直接求最高档，服务端给到什么算什么。
+    Auto,
+    Hires,
+    Lossless,
+    Exhigh,
+    Higher,
+    Standard,
+}
+
+/// 从标准档到最高档，`chain()` 按它往前退。
+const QUALITY_DESC: [Quality; 5] = [
+    Quality::Hires,
+    Quality::Lossless,
+    Quality::Exhigh,
+    Quality::Higher,
+    Quality::Standard,
+];
+
+impl Quality {
+    /// 请求时用的 `level` 名。`Auto` 从最高档起要 —— 服务端按账号权益往下给，
+    /// 自己猜一个起点反而可能少拿。
+    fn level(self) -> &'static str {
+        match self {
+            Quality::Auto | Quality::Hires => "hires",
+            Quality::Lossless => "lossless",
+            Quality::Exhigh => "exhigh",
+            Quality::Higher => "higher",
+            Quality::Standard => "standard",
+        }
+    }
+
+    /// **无损及以上必须用 `flac` 求**：带 `mp3` 时服务端不会给 flac 流，
+    /// 这一条漏了就永远拿不到无损。
+    fn encode_type(self) -> &'static str {
+        if self.rank() >= 3 { "flac" } else { "mp3" }
+    }
+
+    /// 档位高低，只用于比较（与 kbps 不是一回事：`Auto` 代表「不设上限」）。
+    fn rank(self) -> i64 {
+        match self {
+            Quality::Auto | Quality::Hires => 4,
+            Quality::Lossless => 3,
+            Quality::Exhigh => 2,
+            Quality::Higher => 1,
+            Quality::Standard => 0,
+        }
+    }
+
+    /// 请求体里来的档位。**认不出的一律当 `Auto`** —— 宁可多试几档，
+    /// 也不要因为一个拼错的值直接让下载失败。
+    pub fn parse(raw: &str) -> Quality {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hires" | "hi-res" | "master" => Quality::Hires,
+            "lossless" | "flac" => Quality::Lossless,
+            "exhigh" | "320" | "320k" => Quality::Exhigh,
+            "higher" | "192" | "192k" => Quality::Higher,
+            "standard" | "128" | "128k" => Quality::Standard,
+            _ => Quality::Auto,
+        }
+    }
+
+    /// 本档位往下逐级要的序列（含自身）。
+    ///
+    /// 服务端**一般不会因为档位太高而拒绝**（实测求无损会给 320 kbps），所以这条链兜的
+    /// 是另一类情形：某些账号在某个档位**整条不回 `url`**，退一档就能拿到。
+    fn chain(self) -> Vec<Quality> {
+        let top = match self {
+            Quality::Auto => 0,
+            other => QUALITY_DESC.iter().position(|q| *q == other).unwrap_or(0),
+        };
+        QUALITY_DESC[top..].to_vec()
+    }
+}
+
+/// 回包 `level` 的等级，用来判断「是不是被静默降级了」。
+///
+/// **认不出的 `level` 一律当「不比请求低」**（99）：老接口、以后新加的档位名都不该
+/// 把一条能用的直链判成降级。
+fn level_rank(level: &str) -> i64 {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "standard" => 0,
+        "higher" => 1,
+        "exhigh" => 2,
+        "lossless" | "sky" | "jyeffect" => 3,
+        "hires" | "jymaster" => 4,
+        _ => 99,
+    }
+}
+
+/// 统一的取直链入口：回包 `data` 那个数组，每项含 `url` / `level` / `br` / `size` /
+/// `type` / `code` / `freeTrialPrivilege`。**下载与搜索结果的「能不能下」标注都走这里。**
 ///
 /// 参数形状照网页播放器抄：`ids` 要是 JSON 数组（下载传一个、搜索结果一次传 20 个），
-/// `level` + `encodeType` 缺一不可 —— **少了 `encodeType` 就对免费账号大面积不回
-/// url**。`exhigh` = 极高档，配合 `mp3` 回 320 kbps。
+/// `level` + `encodeType` 缺一不可 —— **少了 `encodeType` 就对免费账号大面积不回 url**。
 async fn fetch_media(
     client: &reqwest::Client,
     cookie: &str,
     ids: &str,
+    quality: Quality,
 ) -> Result<Vec<Value>, String> {
     let url = format!(
         "https://music.163.com/api/song/enhance/player/url/v1\
-         ?ids=%5B{ids}%5D&level=exhigh&encodeType=mp3"
+         ?ids=%5B{ids}%5D&level={}&encodeType={}",
+        quality.level(),
+        quality.encode_type()
     );
     let data = get_json(client, &url, DEFAULT_UA, REFER_NETEASE, cookie).await?;
     Ok(data
@@ -546,12 +665,20 @@ async fn fetch_media(
         .unwrap_or_default())
 }
 
-/// 拿一首歌的直链并下载到 `dest`，返回 `(字节数, 音质标签, 格式)`。
+/// 下载结果。`level` 是**实际**拿到的档位（服务端可能降级），`format` 按**文件头**认。
+pub struct SongFile {
+    pub bytes: u64,
+    pub level: String,
+    pub format: String,
+    /// 服务端给的档位低于请求档位（如求无损只给 320 kbps）——界面据此如实说明
+    pub downgraded: bool,
+}
+
+/// 拿一首歌的直链并下载到 `dest`，返回实际拿到的档位与格式。
 ///
-/// ⚠️ 取直链只认 `/api/song/enhance/player/url/v1` + `level` + `encodeType`：
-/// 缺 `encodeType` 对免费账号**大面积不回 url**；`exhigh` + `mp3` 回 320 kbps。
-/// ⚠️ 别用 `song/media/outer/url`（302 到 404 页）或 `enhance/download/url`
-/// （回 `{"data":null,"code":301}` 要登录）。格式由回包的 `type` 决定，不是写死 mp3。
+/// ⚠️ 取直链只认 `/api/song/enhance/player/url/v1` + `level` + `encodeType`（见 `fetch_media`）。
+/// 别用 `song/media/outer/url`（302 到 404 页）或 `enhance/download/url`
+/// （回 `{"data":null,"code":301}` 要登录）。
 ///
 /// ⚠️ **能不能下只能看这个接口的返回，不能凭 `fee` 预判**（同为 `fee=0` 的歌两种
 /// 结果都出现过）。歌能不能听是平台的事，本工具只如实报结果。
@@ -559,67 +686,168 @@ async fn fetch_media(
 /// ⚠️ CDN 那一跳只挂 UA、**不挂 Cookie**（直链自带 token，不带 UA / Referer 也回
 /// 206）—— 少一份把 Cookie 发去 CDN 的风险。**取直链那一跳必须带 Cookie**：
 /// v1 对已登录用户才按账号权益给 url。
+///
+/// `expected_sec` 是曲目时长（搜索 / 详情接口给的），用来拦「只拿到 30 秒试听片段」；
+/// 传 0 表示拿不到时长 —— 此时不判，宁可不判也不用一个猜的时长误杀整首歌。
 pub async fn download_song(
     cfg: &Value,
     id: &str,
     dest: &Path,
-) -> Result<(u64, String, String), String> {
+    quality: Quality,
+    expected_sec: i64,
+) -> Result<SongFile, String> {
     // 取直链是小请求，用普通超时；**下音频必须换成 media_client**（见那里的注释：
     // 20 秒装不下几 MB 的歌，会被掐成含糊的「error decoding response body」）
     let client = media_client(cfg)?;
     let cookie = cookie_of(cfg);
 
-    let media = fetch_media(&client, &cookie, id)
-        .await?
-        .into_iter()
-        .next()
-        .unwrap_or(Value::Null);
+    // 逐级往下试（链见 `Quality::chain`）：服务端一般会降级而不是拒绝，
+    // 这条链兜的是「某个档位整条不回 url」那种账号
+    let mut media = Value::Null;
+    for q in quality.chain() {
+        let got = fetch_media(&client, &cookie, id, q)
+            .await?
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null);
+        let usable = !s(&got, "/url").is_empty();
+        media = got;
+        if usable {
+            break;
+        }
+    }
 
     let direct = s(&media, "/url");
     if direct.is_empty() {
         return Err(no_direct_link_reason(&media));
     }
 
+    let actual = s(&media, "/level");
+    let br = n(&media, "/br");
+    let declared_size = n(&media, "/size");
+    // `Auto` 不设上限，「降级」对它没有意义
+    let downgraded = quality != Quality::Auto && level_rank(&actual) < quality.rank();
+
+    // 先写 `<目标>.part`，全部校验过了才改名成正式文件：中断 / 校验失败 / 改名失败
+    // 都只留一个可清理的临时文件，用户目录里不会出现半截歌
+    let part = part_path(dest);
     // 边下边写（`save_stream`）。不用 `get_bytes`：几 MB 的音频没必要占内存，
     // 而且流式读才能配合 `media_client()` 的 read_timeout（数据在流就不算超时）。
-    let size = save_stream(&client, &direct, DEFAULT_UA, REFER_NETEASE, "", dest).await?;
+    let size = save_stream(&client, &direct, DEFAULT_UA, REFER_NETEASE, "", &part).await?;
+
     if size == 0 {
-        let _ = std::fs::remove_file(dest);
-        return Err("下载到的音频是空的（直链可能已经失效，重试一次通常就好了）".to_string());
+        return Err(discard(&part, "下载到的音频是空的（直链可能已经失效，重试一次通常就好了）"));
     }
 
-    // 直链失效时 CDN 可能回一页 HTML 而不是音频。已经写下去了，读回头几个字节挡一下，
-    // 别把错误页当成歌留在用户目录里
-    if !file_looks_like_audio(dest) {
-        let _ = std::fs::remove_file(dest);
-        return Err("拿到的不是音频数据（直链可能已经过期，重试一次通常就好了）".to_string());
-    }
-
-    Ok((
-        size,
-        level_label(&s(&media, "/level"), n(&media, "/br")),
-        format_of(&media),
-    ))
-}
-
-/// 读文件头判断是不是音频（`looks_like_audio` 的按文件版本）。
-fn file_looks_like_audio(dest: &Path) -> bool {
-    use std::io::Read;
-    let mut head = [0u8; 4];
-    let Ok(mut f) = std::fs::File::open(dest) else {
-        return false;
+    // 直链失效时 CDN 可能回一页 HTML 而不是音频。格式也以文件头为准 ——
+    // 接口的 `type` 会与实际内容不符（实测求 flac 时 `type` 写的是 mp3）
+    let head = read_head(&part, 16);
+    let Some(format) = audio_format(&head) else {
+        return Err(discard(&part, "拿到的不是音频数据（直链可能已经过期，重试一次通常就好了）"));
     };
-    match f.read_exact(&mut head) {
-        Ok(()) => looks_like_audio(&head),
-        // 文件比 4 字节还短：不是音频
-        Err(_) => false,
+
+    // 服务端给了准确体积就核对一遍：短一截说明传输中途断了
+    if declared_size > 0 && (size as i64 - declared_size).abs() > declared_size / 20 {
+        return Err(discard(
+            &part,
+            &format!(
+                "下到的文件不完整（拿到 {size} 字节，服务端声明 {declared_size} 字节），\
+                 重试一次通常就好了"
+            ),
+        ));
+    }
+
+    // 30 秒试听片段本身是合法音频，文件头拦不住，只能按时长认
+    if let Some(why) = duration_mismatch(size, br, expected_sec) {
+        return Err(discard(&part, &why));
+    }
+
+    std::fs::rename(&part, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        format!("保存失败：{e}")
+    })?;
+
+    Ok(SongFile {
+        bytes: size,
+        level: level_label(&actual, br),
+        format: format.to_string(),
+        downgraded,
+    })
+}
+
+/// 删掉临时文件并返回给用户看的原因。失败路径一律走这里，免得漏删。
+fn discard(part: &Path, why: &str) -> String {
+    let _ = std::fs::remove_file(part);
+    why.to_string()
+}
+
+/// 临时文件名：`.part` 追加在原名**之后**，不当扩展名用 ——
+/// `with_extension("part")` 会把 `.mp3` 顶掉，校验通过后改回原名就对不上了。
+fn part_path(dest: &Path) -> PathBuf {
+    let mut raw = dest.as_os_str().to_os_string();
+    raw.push(".part");
+    PathBuf::from(raw)
+}
+
+/// 读文件头前 `n` 个字节；读不满就返回已有的部分（打不开返回空）。
+fn read_head(dest: &Path, n: usize) -> Vec<u8> {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(dest) else {
+        return Vec::new();
+    };
+    let mut buf = vec![0u8; n];
+    match f.read(&mut buf) {
+        Ok(got) => {
+            buf.truncate(got);
+            buf
+        }
+        Err(_) => Vec::new(),
     }
 }
 
-/// 接口回包里的容器格式（`mp3` / `m4a` / `flac`），空则按 mp3 兜底。
-fn format_of(media: &Value) -> String {
-    let t = s(media, "/type");
-    if t.is_empty() { "mp3".to_string() } else { t }
+/// 按文件头认容器格式，认不出返回 `None`（调用方据此判「这不是音频」）。
+///
+/// 认这四种够用：实测 `type` 只回 `mp3` / `flac` / `m4a`。**以文件头为准而不是接口的
+/// `type`** —— 实测求 flac 时接口照样写 mp3，内容也确实是 mp3。
+fn audio_format(head: &[u8]) -> Option<&'static str> {
+    if head.len() < 4 {
+        return None;
+    }
+    if head.starts_with(b"ID3") || (head[0] == 0xFF && head[1] & 0xE0 == 0xE0) {
+        return Some("mp3");
+    }
+    if head.starts_with(b"fLaC") {
+        return Some("flac");
+    }
+    if head.starts_with(b"OggS") {
+        return Some("ogg");
+    }
+    // m4a / mp4：第 5..8 字节是 `ftyp`
+    if head.len() >= 8 && &head[4..8] == b"ftyp" {
+        return Some("m4a");
+    }
+    None
+}
+
+/// 时长对不上就返回一句给人看的原因，对得上返回 `None`。
+///
+/// 判据是 `字节数 × 8 ÷ 码率`：不用解码器，而 `size` 与 `br` 是服务端一起给的
+/// （实测四个档位算出的时长只差 0.1 秒），所以这判据很稳。15% 的余量是留给 VBR 的，
+/// 而 30 秒试听与整首歌差一个数量级，照样拦得住。
+fn duration_mismatch(bytes: u64, br: i64, expected_sec: i64) -> Option<String> {
+    if br <= 0 || bytes == 0 || expected_sec <= 0 {
+        return None;
+    }
+    let got = bytes as f64 * 8.0 / br as f64;
+    if got < expected_sec as f64 * 0.85 {
+        return Some(format!(
+            "只拿到约 {} 秒音频（这首歌约 {} 秒）。未登录或非会员有时只能试听，\
+             登录后重试，或换搜索结果里的另一个版本试试。",
+            got.round() as i64,
+            expected_sec
+        ));
+    }
+    None
 }
 
 /// 拿不到直链时，按接口给的信息说清楚为什么。
@@ -649,18 +877,6 @@ fn no_direct_link_reason(media: &Value) -> String {
     }
 }
 
-/// 前几个字节看着像不像音频。
-///
-/// 认四种：`ID3`（带标签的 mp3）、`0xFF 0xEx`（裸 mp3 帧头）、`fLaC`、`OggS`。
-/// 不是要当解码器，只是不想把 CDN 的错误页当 mp3 存下来。
-fn looks_like_audio(bytes: &[u8]) -> bool {
-    bytes.len() >= 4
-        && (bytes.starts_with(b"ID3")
-            || bytes.starts_with(b"fLaC")
-            || bytes.starts_with(b"OggS")
-            || (bytes[0] == 0xFF && bytes[1] & 0xE0 == 0xE0))
-}
-
 /// 把接口回的 `level` + `br` 说成人话，用于「已下载（320 kbps）」这类提示。
 fn level_label(level: &str, br: i64) -> String {
     let name = match level {
@@ -685,32 +901,264 @@ fn level_label(level: &str, br: i64) -> String {
 
 /* ══════════════════════════ 短信验证码登录（网易云） ══════════════════════════ */
 
-/// 问一下「现在登录的是谁」，只为把界面徽章写成「已登录为 xxx」。
+/* ═════════════════ 登录态：校验 / 会员标签 / 过期与续期 ═════════════════ */
+
+/// 服务端给 `MUSIC_U` 的 Max-Age 是 180 天，续期后重新计时。
+/// 只在响应头里读不出有效期时当兜底估算用。
+pub const COOKIE_TTL_SECONDS: i64 = 180 * 24 * 3600;
+
+/// 剩余不足多少天就该自动续期。
+pub const RENEW_BEFORE_DAYS: i64 = 7;
+
+/// 会员等级用的中文大写数字 —— 网易云客户端写的是「黑胶SVIP·肆」而不是「黑胶SVIP Lv4」。
+const CN_DIGITS: [&str; 10] = ["零", "壹", "贰", "叁", "肆", "伍", "陆", "柒", "捌", "玖"];
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 现在这一刻（unix 秒）。IPC 层拿它配 `should_renew` 判断该不该续期 ——
+/// 「现在几点」只在这一处取，免得前后端各算一遍还对不上。
+pub fn now_unix() -> i64 {
+    now_secs()
+}
+
+/// 凭据是否该续期了（剩余有效期不足 `days` 天）。
 ///
-/// 只用昵称：头像与 userId 前端不用。
-/// 没登录时接口回 `{"code":200,"account":null,"profile":null}`（实测），所以全程当可空处理；
-/// 失败就回空串 —— 它只是装饰，不该让登录本身报错。
-pub async fn account_nickname(cfg: &Value) -> Result<String, String> {
+/// `days <= 0` 表示关掉自动续期；`expires_at` 缺失（只存了 Cookie、没记有效期的
+/// 老配置）时**续一次**把有效期补上，否则永远判不出该不该续。
+pub fn should_renew(expires_at: i64, now: i64, days: i64) -> bool {
+    if days <= 0 {
+        return false;
+    }
+    if expires_at <= 0 {
+        return true;
+    }
+    expires_at - now <= days * 86400
+}
+
+/// 从响应头里读 `MUSIC_U` 的过期时间（unix 秒，读不到返回 0）。
+///
+/// 登录 / 续期接口**不在响应体里回 Cookie，而是用 `Set-Cookie` 换发一个新的
+/// MUSIC_U**（值会变、Max-Age 重新计时）。所以有效期只能从响应头解析 ——
+/// 比「拿到的时刻 + 180 天」准。只认 `Max-Age`（服务端一直在用）；
+/// `Expires` 是绝对时间、解析要论 HTTP 日期格式，没把握就不猜，回 0 让调用方用 TTL 兜底。
+fn cookie_expiry_from_set_cookie(headers: &reqwest::header::HeaderMap) -> i64 {
+    for value in headers.get_all(reqwest::header::SET_COOKIE).iter() {
+        let Ok(raw) = value.to_str() else { continue };
+        let mut parts = raw.split(';');
+        let Some(first) = parts.next() else { continue };
+        if !first
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case("MUSIC_U")
+        {
+            continue;
+        }
+        for attr in parts {
+            let (key, val) = attr.split_once('=').unwrap_or(("", ""));
+            if key.trim().eq_ignore_ascii_case("max-age") {
+                if let Ok(secs) = val.trim().parse::<i64>() {
+                    return now_secs() + secs;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// 会员等级后缀：`4` → `·肆`。等级是服务端给的，**超出 1..99 时不猜**，
+/// 原样退回阿拉伯数字；0 / 拿不到返回空串（界面就不显示等级）。
+fn vip_level_suffix(level: i64) -> String {
+    if level <= 0 {
+        return String::new();
+    }
+    if level > 99 {
+        return format!("·{level}");
+    }
+    if level < 10 {
+        return format!("·{}", CN_DIGITS[level as usize]);
+    }
+    let (tens, ones) = (level / 10, level % 10);
+    let head = if tens == 1 {
+        "拾".to_string()
+    } else {
+        format!("{}拾", CN_DIGITS[tens as usize])
+    };
+    if ones == 0 {
+        format!("·{head}")
+    } else {
+        format!("·{head}{}", CN_DIGITS[ones as usize])
+    }
+}
+
+/// 会员标签。`vipType` 是**按十进制位值拼出来的**：`1` 音乐包、`10` 黑胶VIP、
+/// `100` 黑胶SVIP，同时有多项就相加（实测同一个 SVIP 账号两处写法不同：
+/// `account.vipType=11` 是标量、`profile.vipType=110` 是位掩码）。
+/// 这三个值二进制位互不相交（0b1 / 0b1010 / 0b1100100），所以 `&` 判得出来，
+/// **别把它们当二进制位读**（`0b100` = 4 是另一个数）。
+/// 另有标量 `20` 与会员接口的 `vipCode=300` 也表示 SVIP。
+/// `0` 与缺失单独处理，**别把 0 当成「音乐包」**。
+fn vip_label(vip_type: i64, level: i64) -> String {
+    if vip_type <= 0 {
+        return "普通用户".to_string();
+    }
+    if vip_type == 20 || vip_type == 300 || vip_type & 100 != 0 {
+        return format!("黑胶SVIP{}", vip_level_suffix(level));
+    }
+    if vip_type & 10 != 0 || vip_type == 10 || vip_type == 11 {
+        return "黑胶VIP".to_string();
+    }
+    if vip_type & 1 != 0 || vip_type == 1 {
+        return "音乐包".to_string();
+    }
+    "普通用户".to_string()
+}
+
+/// 登录态查询结果。
+///
+/// `state` 是四态，**必须把「凭据失效」和「网络不通」分开**：前者要把界面置为未登录并
+/// 引导重新登录，后者绝不能因此清掉本地的登录态。
+pub struct AccountInfo {
+    /// `ok` / `expired` / `offline` / `anonymous`（本地根本没配 Cookie）
+    pub state: &'static str,
+    pub nickname: String,
+    /// 「黑胶SVIP·肆」/「黑胶VIP」/「音乐包」/「普通用户」；未登录时是空串
+    pub vip: String,
+    /// 排查用的明细：等级这里特意保留服务端的 `LvN` 写法，报问题时能和服务端对上
+    pub vip_detail: String,
+}
+
+impl AccountInfo {
+    fn new(state: &'static str) -> AccountInfo {
+        AccountInfo {
+            state,
+            nickname: String::new(),
+            vip: String::new(),
+            vip_detail: String::new(),
+        }
+    }
+}
+
+/// 会员等级（`redVipLevel`）。等级不在账号信息里，要单独问会员接口；
+/// **拿不到就返回 0**（界面不显示等级），不影响账号的其它信息。
+async fn vip_level(client: &reqwest::Client, cookie: &str) -> i64 {
+    let url = "https://music.163.com/api/music-vip-membership/client/vip/info";
+    let Ok(json) = get_json(client, url, DEFAULT_UA, REFER_NETEASE, cookie).await else {
+        return 0;
+    };
+    if n(&json, "/code") != 200 {
+        return 0;
+    }
+    n(&json, "/data/redVipLevel")
+}
+
+/// 问一下「现在登录的是谁、什么会员」，顺带把登录态判出来。
+///
+/// 没登录时账号接口回 `{"code":200,"account":null,"profile":null}`（实测），
+/// 所以「code=200 但 account 与 profile 都是 null」= 凭据失效，不是成功。
+/// 服务端用它自己的错误码说「这个凭据不行了」（250 需要验证 / 301、302 未登录 /
+/// 401、403 无权限）；**其它错误码一律当网络问题**，不敢据此把用户登出。
+pub async fn account_info(cfg: &Value) -> AccountInfo {
     let cookie = cookie_of(cfg);
     if cookie.is_empty() {
-        return Ok(String::new());
+        return AccountInfo::new("anonymous");
     }
-    let json = get_json(
-        &client(cfg)?,
-        "https://music.163.com/api/w/nuser/account/get",
-        DEFAULT_UA,
-        REFER_NETEASE,
-        &cookie,
-    )
-    .await?;
+    let Ok(client) = client(cfg) else {
+        return AccountInfo::new("offline");
+    };
+    let url = "https://music.163.com/api/w/nuser/account/get";
+    let Ok(json) = get_json(&client, url, DEFAULT_UA, REFER_NETEASE, &cookie).await else {
+        // 请求发不出去 / 回的解析不了：算网络问题，不动登录态
+        return AccountInfo::new("offline");
+    };
+    let code = n(&json, "/code");
+    if matches!(code, 250 | 301 | 302 | 401 | 403) {
+        return AccountInfo::new("expired");
+    }
+    if code != 200 {
+        return AccountInfo::new("offline");
+    }
+    let present = |ptr: &str| json.pointer(ptr).map(|v| !v.is_null()).unwrap_or(false);
+    if !present("/account") && !present("/profile") {
+        return AccountInfo::new("expired");
+    }
 
     // 昵称的落点在不同版本里有 profile.nickname / profile.userName 两种，都认
-    let nickname = s(&json, "/profile/nickname");
-    Ok(if nickname.is_empty() {
-        s(&json, "/profile/userName")
-    } else {
-        nickname
-    })
+    let nickname = {
+        let a = s(&json, "/profile/nickname");
+        if a.is_empty() {
+            s(&json, "/profile/userName")
+        } else {
+            a
+        }
+    };
+    // account.vipType 是标量、profile.vipType 是位掩码，两者含义不同 —— 标量优先
+    let vip_type = {
+        let a = n(&json, "/account/vipType");
+        if a != 0 { a } else { n(&json, "/profile/vipType") }
+    };
+    let level = vip_level(&client, &cookie).await;
+
+    AccountInfo {
+        state: "ok",
+        nickname,
+        vip: vip_label(vip_type, level),
+        vip_detail: if level > 0 {
+            format!("vipType={vip_type} · 等级 Lv{level}")
+        } else {
+            format!("vipType={vip_type}")
+        },
+    }
+}
+
+/// 续期登录凭据。成功返回 `(新的 Cookie 串, 新的过期时间)`，失败返回 `None`。
+///
+/// 接口是 `/api/login/token/refresh`：**服务端不在响应体里回 Cookie，而是用
+/// `Set-Cookie` 换发一个新的 MUSIC_U**（值会变、Max-Age 重新计时）。换发后旧的
+/// MUSIC_U 仍然有效，所以即使落盘失败也不会把已登录的会话踢下线 —— 调用方因此
+/// 可以放心地「续期失败就照旧用」。
+///
+/// 拿不到新的 `Set-Cookie` 时退回原 Cookie：值没变也可能只是服务端延长了 Max-Age，
+/// 此时把有效期按 TTL 往前推一次，总比一直判「该续期」然后每次启动都白试一次强。
+pub async fn refresh_login(cfg: &Value) -> Option<(String, i64)> {
+    let cookie = cookie_of(cfg);
+    if cookie.is_empty() {
+        return None;
+    }
+    let client = client(cfg).ok()?;
+    let url = "https://music.163.com/api/login/token/refresh";
+    let res = client
+        .post(url)
+        .header("User-Agent", DEFAULT_UA)
+        .header("Referer", REFER_NETEASE)
+        .header("Origin", "https://music.163.com")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Cookie", &cookie)
+        .body("")
+        .send()
+        .await
+        .ok()?;
+
+    let status = res.status().as_u16();
+    let renewed = cookie_from_set_cookie(res.headers());
+    let expiry = cookie_expiry_from_set_cookie(res.headers());
+    let text = res.text().await.unwrap_or_default();
+    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+
+    if !(200..300).contains(&status) || n(&json, "/code") != 200 {
+        return None;
+    }
+    if renewed.contains("MUSIC_U") {
+        let at = if expiry > 0 { expiry } else { now_secs() + COOKIE_TTL_SECONDS };
+        return Some((renewed, at));
+    }
+    Some((cookie, now_secs() + COOKIE_TTL_SECONDS))
 }
 
 /// 短信登录的路子（`/api/sms/captcha/sent` + `/api/w/login/cellphone`）**全是明文**，
@@ -777,8 +1225,16 @@ pub async fn sms_send(cfg: &Value, phone: &str) -> Result<Value, String> {
     .await
 }
 
-/// 手机号 + 短信验证码登录，返回登录后的整条 Cookie 串（`MUSIC_U=…; __csrf=…`）。
-pub async fn cellphone_login(cfg: &Value, phone: &str, captcha: &str) -> Result<String, String> {
+/// 手机号 + 短信验证码登录，返回 `(整条 Cookie 串, 过期时间)`。
+///
+/// Cookie 形如 `MUSIC_U=…; __csrf=…`。过期时间从响应头的 `Set-Cookie` 里读
+/// （服务端下发 MUSIC_U 时会带上 Max-Age），读不到就按 180 天 TTL 估算 ——
+/// 有这个时间才判得出「该不该续期」（见 `should_renew`）。
+pub async fn cellphone_login(
+    cfg: &Value,
+    phone: &str,
+    captcha: &str,
+) -> Result<(String, i64), String> {
     if !phone_ok(phone) {
         return Err("手机号格式错误：需要 11 位数字且以 1 开头".to_string());
     }
@@ -809,13 +1265,15 @@ pub async fn cellphone_login(cfg: &Value, phone: &str, captcha: &str) -> Result<
     let status = res.status().as_u16();
     // 登录成功时网易云是在响应头里下发 Cookie 的 —— 先把头摘下来，body 解析失败也不丢
     let from_header = cookie_from_set_cookie(res.headers());
+    let expiry = cookie_expiry_from_set_cookie(res.headers());
     let text = res.text().await.unwrap_or_default();
     let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
 
     // 1) 响应体里的 cookie（老版接口的形状），2) Set-Cookie 响应头（现在多半走这条）
     for candidate in [s(&json, "/cookie"), from_header] {
         if candidate.contains("MUSIC_U") {
-            return Ok(candidate);
+            let at = if expiry > 0 { expiry } else { now_secs() + COOKIE_TTL_SECONDS };
+            return Ok((candidate, at));
         }
     }
 
@@ -1667,20 +2125,6 @@ mod tests {
     }
 
     #[test]
-    fn audio_sniffing_rejects_html_error_pages() {
-        // 实测下到的 mp3 头是 ID3（49 44 33 04）
-        assert!(looks_like_audio(b"ID3\x04\x00\x00\x00\x00\x00\x00"));
-        // 裸 mp3 帧头 0xFF 0xEx
-        assert!(looks_like_audio(&[0xFF, 0xFB, 0x90, 0x00]));
-        assert!(looks_like_audio(b"fLaC\x00\x00\x00\x22"));
-        assert!(looks_like_audio(b"OggS\x00\x02\x00\x00"));
-        // 直链过期时 CDN 会回一页 HTML，不能当 mp3 存下来
-        assert!(!looks_like_audio(b"<!DOCTYPE html><html>"));
-        assert!(!looks_like_audio(b"Not Found"));
-        assert!(!looks_like_audio(b""));
-    }
-
-    #[test]
     fn level_label_reads_like_a_human() {
         assert_eq!(level_label("exhigh", 320_001), "极高 / 320 kbps");
         assert_eq!(level_label("lossless", 999_000), "无损 / 999 kbps");
@@ -1715,11 +2159,180 @@ mod tests {
     }
 
     #[test]
-    fn format_of_falls_back_to_mp3() {
-        // 实测 exhigh + mp3 回 type=mp3；有些档位回 m4a（扩展名要跟着改）
-        assert_eq!(format_of(&json!({ "type": "mp3" })), "mp3");
-        assert_eq!(format_of(&json!({ "type": "m4a" })), "m4a");
-        assert_eq!(format_of(&json!({ "type": "" })), "mp3");
-        assert_eq!(format_of(&Value::Null), "mp3");
+    fn quality_maps_to_the_request_level_and_encoder() {
+        // 实测：standard/higher/exhigh 回 128/192/320 kbps；lossless/hires 才是 flac 流
+        assert_eq!(Quality::Standard.level(), "standard");
+        assert_eq!(Quality::Exhigh.level(), "exhigh");
+        assert_eq!(Quality::Lossless.level(), "lossless");
+        assert_eq!(Quality::Hires.level(), "hires");
+        // Auto 从最高档起要，服务端按账号权益往下给
+        assert_eq!(Quality::Auto.level(), "hires");
+
+        // 无损及以上必须用 flac 求，否则永远拿不到 flac 流
+        assert_eq!(Quality::Standard.encode_type(), "mp3");
+        assert_eq!(Quality::Exhigh.encode_type(), "mp3");
+        assert_eq!(Quality::Lossless.encode_type(), "flac");
+        assert_eq!(Quality::Hires.encode_type(), "flac");
+    }
+
+    #[test]
+    fn quality_chain_only_walks_down() {
+        // 链必须从本档往下，不能往上：往上要只会拿到同一个降级结果，白费一次请求
+        assert_eq!(Quality::Lossless.chain(), vec![Quality::Lossless, Quality::Exhigh, Quality::Higher, Quality::Standard]);
+        assert_eq!(Quality::Standard.chain(), vec![Quality::Standard]);
+        assert_eq!(Quality::Auto.chain().len(), 5);
+    }
+
+    #[test]
+    fn quality_parse_never_fails_on_a_typo() {
+        assert_eq!(Quality::parse("lossless"), Quality::Lossless);
+        assert_eq!(Quality::parse("  HIRES "), Quality::Hires);
+        assert_eq!(Quality::parse("320k"), Quality::Exhigh);
+        assert_eq!(Quality::parse("128"), Quality::Standard);
+        // 认不出的值当 Auto（宁可多试几档，也不要因为拼错就直接失败）
+        assert_eq!(Quality::parse(""), Quality::Auto);
+        assert_eq!(Quality::parse("随便写的"), Quality::Auto);
+    }
+
+    #[test]
+    fn level_rank_detects_the_silent_downgrade() {
+        // 实测最要紧的一条：未登录求 lossless/hires，服务端回 level=exhigh + mp3，
+        // 所以「回包 level 的等级 < 请求档位」就是降级，不能当成拿到了无损
+        assert!(level_rank("exhigh") < Quality::Lossless.rank());
+        assert!(level_rank("exhigh") < Quality::Hires.rank());
+        // 够档位就不算降级
+        assert!(level_rank("lossless") >= Quality::Lossless.rank());
+        // 认不出的档位名（老接口 / 以后新加的）当作「不比请求低」，不误杀能用直链
+        assert!(level_rank("something_new") >= Quality::Hires.rank());
+    }
+
+    #[test]
+    fn audio_format_reads_the_magic_bytes() {
+        assert_eq!(audio_format(b"ID3\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), Some("mp3"));
+        assert_eq!(audio_format(&[0xFF, 0xFB, 0x90, 0x00]), Some("mp3"));
+        assert_eq!(audio_format(b"fLaC\x00\x00\x00\x22"), Some("flac"));
+        assert_eq!(audio_format(b"OggS\x00\x02\x00\x00"), Some("ogg"));
+        // m4a：前 4 字节是 box 长度，第 5..8 字节才是 ftyp
+        assert_eq!(audio_format(b"\x00\x00\x00\x20ftypM4A "), Some("m4a"));
+        // CDN 的错误页 / 空文件不能被当成音频
+        assert_eq!(audio_format(b"<!DOCTYPE html><html>"), None);
+        assert_eq!(audio_format(b"Not Found"), None);
+        assert_eq!(audio_format(b""), None);
+    }
+
+    #[test]
+    fn duration_mismatch_catches_a_trial_clip() {
+        // 32 kbps… 换成实测形状：320 kbps、整首 223 秒 ≈ 8.9 MB
+        let whole = 320_000u64 * 223 / 8;
+        assert!(duration_mismatch(whole, 320_000, 223).is_none());
+        // 30 秒试听：同一个码率下只有整首的七分之一，必须判出来
+        let trial = 320_000u64 * 30 / 8;
+        let why = duration_mismatch(trial, 320_000, 223);
+        assert!(why.is_some(), "30 秒试听必须判失败");
+        assert!(why.unwrap().contains("30"));
+        // VBR 的余量：15% 以内的偏差不判（拿不到准确码率时别误杀）
+        let slightly_short = 320_000u64 * 200 / 8;
+        assert!(duration_mismatch(slightly_short, 320_000, 223).is_none());
+        // 时长 / 码率缺失时不判 —— 宁可不判，也不用猜的值误杀
+        assert!(duration_mismatch(whole, 0, 223).is_none());
+        assert!(duration_mismatch(whole, 320_000, 0).is_none());
+        assert!(duration_mismatch(0, 320_000, 223).is_none());
+    }
+
+    #[test]
+    fn part_path_keeps_the_original_extension() {
+        // `.part` 必须追加在原名之后：with_extension("part") 会把 .mp3 顶掉，
+        // 校验通过后改回原名就对不上了
+        let p = part_path(&Path::new("out").join("歌.mp3"));
+        // ⚠️ extension() 看到的是**最后**一段，所以这里是 part；原扩展名留在 file_stem
+        // 里（`歌.mp3`）—— 这正是「追加」而非「替换」的意义，改回原名才对得上
+        assert_eq!(p.extension().and_then(|x| x.to_str()), Some("part"));
+        assert_eq!(p.file_stem().and_then(|x| x.to_str()), Some("歌.mp3"));
+        assert!(p.to_string_lossy().ends_with("歌.mp3.part"));
+    }
+
+    #[test]
+    fn should_renew_only_when_the_credential_is_running_out() {
+        let now = 1_700_000_000;
+        let day = 86_400;
+        // 还剩 30 天：不该续
+        assert!(!should_renew(now + 30 * day, now, 7));
+        // 还剩 3 天：该续
+        assert!(should_renew(now + 3 * day, now, 7));
+        // 已经过期：也该续（续一次才有机会拿到新的）
+        assert!(should_renew(now - day, now, 7));
+        // 有效期未知（只存了 Cookie 的老配置）：续一次把有效期补上
+        assert!(should_renew(0, now, 7));
+        // days<=0 = 关掉自动续期，什么时候都不续
+        assert!(!should_renew(0, now, 0));
+        assert!(!should_renew(now + day, now, -1));
+    }
+
+    #[test]
+    fn cookie_expiry_reads_max_age_from_the_renewal_header() {
+        let mut h = reqwest::header::HeaderMap::new();
+        // 线上形状：登录 / 续期用 Set-Cookie 换发 MUSIC_U，Max-Age 重新计时
+        h.append(
+            reqwest::header::SET_COOKIE,
+            reqwest::header::HeaderValue::from_static(
+                "MUSIC_U=abc123; Path=/; Max-Age=15552000; HttpOnly",
+            ),
+        );
+        // 其它 Cookie 的过期时间不能算到 MUSIC_U 头上
+        h.append(
+            reqwest::header::SET_COOKIE,
+            reqwest::header::HeaderValue::from_static("__csrf=xyz; Max-Age=60"),
+        );
+        let got = cookie_expiry_from_set_cookie(&h);
+        let now = now_secs();
+        assert!(
+            got >= now + 15_500_000 && got <= now + 15_552_100,
+            "应读 MUSIC_U 的 Max-Age（180 天），实际 {got}"
+        );
+
+        // 没有 Set-Cookie / 只有 Expires（绝对时间，不猜）都回 0，由调用方用 TTL 兜底
+        let mut empty = reqwest::header::HeaderMap::new();
+        empty.append(
+            reqwest::header::SET_COOKIE,
+            reqwest::header::HeaderValue::from_static(
+                "MUSIC_U=abc; Expires=Wed, 01 Apr 2027 00:00:00 GMT",
+            ),
+        );
+        assert_eq!(cookie_expiry_from_set_cookie(&empty), 0);
+        assert_eq!(cookie_expiry_from_set_cookie(&reqwest::header::HeaderMap::new()), 0);
+    }
+
+    #[test]
+    fn vip_level_suffix_follows_the_client_wording() {
+        // 客户端写「黑胶SVIP·肆」，不是「黑胶SVIP Lv4」
+        assert_eq!(vip_level_suffix(4), "·肆");
+        assert_eq!(vip_level_suffix(1), "·壹");
+        assert_eq!(vip_level_suffix(10), "·拾");
+        assert_eq!(vip_level_suffix(12), "·拾贰");
+        assert_eq!(vip_level_suffix(99), "·玖拾玖");
+        // 超出 1..99 不猜，原样退回阿拉伯数字
+        assert_eq!(vip_level_suffix(100), "·100");
+        // 0 / 负数（没等级）不显示
+        assert_eq!(vip_level_suffix(0), "");
+        assert_eq!(vip_level_suffix(-3), "");
+    }
+
+    #[test]
+    fn vip_label_handles_both_vip_type_encodings() {
+        // 实测同一个 SVIP 账号：account.vipType=11 标量、profile.vipType=110 位掩码
+        assert_eq!(vip_label(11, 0), "黑胶VIP");
+        assert_eq!(vip_label(110, 0), "黑胶SVIP");
+        // 位值是十进制的 1 / 10 / 100，同时有多项就相加，显示取高的那一档
+        assert_eq!(vip_label(10, 0), "黑胶VIP");
+        assert_eq!(vip_label(100, 0), "黑胶SVIP");
+        assert_eq!(vip_label(101, 0), "黑胶SVIP");
+        assert_eq!(vip_label(111, 0), "黑胶SVIP");
+        // 标量 20 与会员接口给的 vipCode 300 也记作 SVIP
+        assert_eq!(vip_label(20, 4), "黑胶SVIP·肆");
+        assert_eq!(vip_label(300, 4), "黑胶SVIP·肆");
+        // 位 1 = 音乐包；0 与缺失不能当成「音乐包」
+        assert_eq!(vip_label(1, 0), "音乐包");
+        assert_eq!(vip_label(0, 0), "普通用户");
+        assert_eq!(vip_label(-1, 0), "普通用户");
     }
 }

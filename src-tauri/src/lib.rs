@@ -229,6 +229,8 @@ pub fn run() {
             ipc::lyrics::lyrics_logout,
             ipc::lyrics::lyrics_login_sms,
             ipc::lyrics::lyrics_login_cellphone,
+            ipc::lyrics::lyrics_account,
+            ipc::lyrics::lyrics_renew,
             /* ── 音轨分离 ── */
             ipc::svsep::svsep_status,
             ipc::svsep::svsep_start,

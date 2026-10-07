@@ -190,6 +190,13 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
     const [mode, setMode] = useState('both')
     const [format, setFormat] = useState('lrc')
+    /**
+     * 下载档位上限：`auto` / `hires` / `lossless` / `exhigh` / `higher` / `standard`。
+     *
+     * ⚠️ 它是**上限不是承诺** —— 服务端会静默降级（求无损只给 320 kbps），所以界面上一律
+     * 显示回包给的**实际**档位，不显示这里选的值。
+     */
+    const [quality, setQuality] = useState('auto')
     const [bilingual, setBilingual] = useState(true)
 
     const [outDir, setOutDir] = useState('')
@@ -206,6 +213,17 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     const [loginTone, setLoginTone] = useState<ToastTone>('warn')
     const [busy, setBusy] = useState(false)
     const [nickname, setNickname] = useState('')
+    /** 会员标签（「黑胶SVIP·肆」）与 MUSIC_U 的过期时间，跟着 `lyricsAccount` 走 */
+    const [vip, setVip] = useState('')
+    const [expireAt, setExpireAt] = useState(0)
+    /**
+     * 服务端明确说凭据失效了（`lyricsAccount` 的 `expired`）—— 界面据此置为未登录。
+     *
+     * ⚠️ **只改界面，不动已存的 Cookie**：风控误判时清掉，用户就得重新贴一遍。
+     * 网络不通（`offline`）绝不进这个状态。
+     */
+    const [authExpired, setAuthExpired] = useState(false)
+    const [renewing, setRenewing] = useState(false)
     const [neteaseCookie, setNeteaseCookie] = useState('')
 
     /**
@@ -234,6 +252,14 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
         return () => {
             if (timer.current) window.clearTimeout(timer.current)
         }
+    }, [])
+
+    /* 登录态校验 + 临近过期自动续期。挂在挂载时跑一次就够 —— 跟着 `state` 刷新反复打接口
+       没有意义，而「登录态有没有过期」这件事一天变一次。config 只在首帧读，故意不进依赖。 */
+    useEffect(() => {
+        if (!config.neteaseCookie) return
+        void refreshAccount({renew: true})
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
     /** 一条提示只改内容：错误留在页面上，别只弹个 toast 就没了 */
@@ -435,6 +461,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                     id: current.id,
                     outDir,
                     name: name.trim() || current.song?.name || '',
+                    quality,
+                    // 曲目时长用来拦「只拿到 30 秒试听片段」；拿不到就不传，后端此时不判
+                    durationSec: current.song?.durationSec,
                 })
             } catch (e) {
                 // 换版本只在「已经知道别的版本能下」时才做，不然会把真正的错误盖成一次空转
@@ -447,10 +476,18 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                     id: alt.id!,
                     outDir,
                     name: name.trim() || alt.name || '',
+                    quality,
+                    durationSec: alt.durationSec,
                 })
             }
-            // level 是「极高 / 320 kbps」这种给人看的说法，直接跟上
-            onToast(`歌曲已保存 ${res.name}（${res.level}）`, 'ok')
+            // level 是「极高 / 320 kbps」这种给人看的说法，直接跟上。
+            // ⚠️ 服务端会静默降级（求无损只回 320 kbps 且 url 照样给），降级过就明说 ——
+            // 否则用户会以为存下来的是无损
+            onToast(
+                `歌曲已保存 ${res.name}（${res.level}）` +
+                    (res.downgraded ? '。服务端没有给到该档位，上面是它实际给到的最高档' : ''),
+                'ok',
+            )
             setSaved(res.path)
         } catch (e) {
             onToast(errText(e), 'err')
@@ -486,7 +523,58 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
     /* ── 登录（网易云：手机号验证码，兜底是 Cookie）───────────── */
 
-    const loggedIn = !!config.neteaseCookie
+    /**
+     * 问一次账号：昵称、会员标签、有效期。
+     *
+     * ⚠️ **必须区分「凭据失效」和「网络不通」**：只有 `expired` 才提示重新登录；
+     * `offline`（网络/风控）只当没查到 —— 网络抖一下就把用户显示成未登录、
+     * 还引导他重新登录，是错的（后端就是这么分的，别在这里合并掉）。
+     */
+    const refreshAccount = async (opts?: {renew?: boolean}) => {
+        try {
+            const a = await api.lyricsAccount()
+            if (a.state === 'ok') {
+                setAuthExpired(false)
+                setNickname(a.nickname ?? '')
+                setVip(a.vip ?? '')
+                setExpireAt(a.expiresAt ?? 0)
+                // 临近过期就顺手续一次（该不该续由后端算好）。续期失败只是「这次没续上」，不影响登录态
+                if (opts?.renew && a.shouldRenew) void renewLogin()
+            } else if (a.state === 'expired') {
+                // 置为未登录：清掉跟着凭据走的那几项，状态位让 `loggedIn` 变假
+                setAuthExpired(true)
+                setNickname('')
+                setVip('')
+                setExpireAt(0)
+                setMsg('网易云的登录态已经失效，请重新登录（扫码不可用，用短信验证码或换一条 Cookie）。', 'warn')
+            }
+            // offline / anonymous 什么都不做：前者是网络问题，后者本来就该是空
+        } catch {
+            // 本地这条查询都失败：不打扰用户，界面保持原样
+        }
+    }
+
+    /** 续期。服务端是**换发**一个新的 MUSIC_U（旧的也还有效），所以失败不代表掉登录 */
+    const renewLogin = async () => {
+        setRenewing(true)
+        try {
+            const r = await api.lyricsRenew()
+            // 续期成功说明服务端又认这个账号了，把「已失效」摘掉
+            setAuthExpired(false)
+            setExpireAt(r.expiresAt ?? 0)
+            if (r.vip) setVip(r.vip)
+            onToast('网易云登录已续期', 'ok')
+        } catch (e) {
+            onToast(`续期没成功：${errText(e)}（不影响当前登录）`, 'warn')
+        } finally {
+            setRenewing(false)
+        }
+    }
+
+    /** 本地还存着凭据（哪怕服务端已经说它失效）—— 「续期 / 退出登录」按它显示 */
+    const hasCookie = !!config.neteaseCookie
+    /** 状态徽章按它显示：凭据在**且**服务端没说它失效 */
+    const loggedIn = hasCookie && !authExpired
 
     const sendSms = async () => {
         const p = phone.replace(/\D/g, '')
@@ -529,10 +617,17 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
         try {
             const res = await api.lyricsCellphone(p, captcha.trim())
             setCaptcha('')
+            // 刚登录成功，上一次的「已失效」作废
+            setAuthExpired(false)
             setNickname(res.nickname ?? '')
+            setVip(res.vip ?? '')
+            setExpireAt(res.expiresAt ?? 0)
+            // 会员标签跟昵称一起报出来（「已登录为 xxx（黑胶SVIP·肆）」）——
+            // 它直接影响能拿到哪一档音质，用户看一眼就知道无损为什么拿不到
+            const who = [res.nickname, res.vip].filter(Boolean).join('（')
             setMsg(
-                res.nickname
-                    ? `登录成功：${res.nickname}　登录态已经保存，可以直接搜索取歌词了。`
+                who
+                    ? `登录成功：${who}${res.vip ? '）' : ''}　登录态已经保存，可以直接搜索取歌词了。`
                     : '登录成功，登录态已经保存，可以直接搜索取歌词了。',
                 'ok',
             )
@@ -553,6 +648,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
         try {
             await api.lyricsLogout('netease')
             setNickname('')
+            setVip('')
+            setExpireAt(0)
+            setAuthExpired(false)
             await onRefreshState()
             setNeteaseCookie('')
             setMsg('已退出登录。', 'ok')
@@ -580,6 +678,8 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             await api.saveConfig({neteaseCookie: value})
             await onRefreshState()
             setNeteaseCookie('')
+            // 换了凭据就重新判：存了新的当然要摘掉「已失效」，清空了本来也不该留着
+            setAuthExpired(false)
             if (!value) {
                 setNickname('')
                 setMsg('已清除网易云的登录态 Cookie，取歌词会退回未登录。', 'warn')
@@ -602,6 +702,11 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
         current?.source === 'file'
             ? `本地文件${ENC_LABEL[doc?.encoding ?? ''] ? `（${ENC_LABEL[doc?.encoding ?? '']}）` : ''}`
             : '网易云'
+    /**
+     * 凭据还剩几天（负数 = 已经过期）。`null` 表示配置里没记过有效期
+     * （只贴了 Cookie 的老配置），此时不显示 —— 不猜一个数字出来。
+     */
+    const daysLeft = expireAt > 0 ? Math.round((expireAt - Date.now() / 1000) / 86400) : null
     /** 这首歌的收费标签（VIP / 付费专辑 / 低音质免费），免费歌是空串 */
     const fee = feeLabel(song.fee)
 
@@ -710,7 +815,27 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                     网易云：
                                     {loggedIn ? (nickname ? `已登录为 ${nickname}` : '已登录') : '未登录'}
                                 </Chip>
-                                {loggedIn && (
+                                {/* 会员标签决定能拿到哪一档音质（无损 / Hi-Res 要会员），所以跟昵称并排给它 */}
+                                {loggedIn && vip && <Chip tone="ok">{vip}</Chip>}
+                                {loggedIn && daysLeft !== null && (
+                                    <Chip tone={daysLeft <= 0 ? 'err' : 'default'}>
+                                        {daysLeft <= 0 ? '登录态已过期' : `登录态还剩 ${daysLeft} 天`}
+                                    </Chip>
+                                )}
+                                {/* 凭据失效后仍要能续期、能清掉，所以这两个按「存着凭据」显示，
+                                    不按 `loggedIn` —— 否则用户只能重新贴一次 Cookie 才能收拾 */}
+                                {hasCookie && (
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        icon="refresh"
+                                        loading={renewing}
+                                        onClick={renewLogin}
+                                    >
+                                        续期
+                                    </Button>
+                                )}
+                                {hasCookie && (
                                     <Button size="sm" variant="ghost" icon="x" loading={busy} onClick={doLogout}>
                                         退出登录
                                     </Button>
@@ -940,12 +1065,29 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
                         <Field
                             label="文件名"
-                            hint="不用加扩展名，按上面的格式自动补 .lrc / .srt；歌曲固定存成 .mp3，封面按图片真实格式存。歌词文件一律 UTF-8 编码。"
+                            hint="不用加扩展名，按上面的格式自动补 .lrc / .srt；歌曲按「实际音频格式」补（.mp3 / .flac / .m4a，以文件头为准，不信接口自报的格式），封面按图片真实格式存。歌词文件一律 UTF-8 编码。"
                         >
                             <TextInput
                                 value={name}
                                 placeholder={t("文件名（默认：歌名 - 歌手）")}
                                 onChange={(e) => setName(e.target.value)}
+                            />
+                        </Field>
+
+                        <Field
+                            label="下载音质"
+                            hint="档位是「上限」而不是承诺：服务端给不到就按它能拿到的最高档下，并如实写明实际存下来的是哪一档（求无损只给 320K 时不会假装成功）。无损 / Hi-Res 需要对应会员，未登录最高 128K。"
+                        >
+                            <GlassSegmentedControl
+                                aria-label={t("下载音质")}
+                                items={[
+                                    {value: 'auto', label: '自动'},
+                                    {value: 'lossless', label: '无损'},
+                                    {value: 'exhigh', label: '320K'},
+                                    {value: 'standard', label: '128K'},
+                                ]}
+                                value={quality}
+                                onValueChange={setQuality}
                             />
                         </Field>
 
@@ -986,15 +1128,21 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                     </div>
                 </Panel>
 
-                {/* 许可与出处：歌词文本处理的规则是从 163MusicLyrics 移植的 */}
+                {/* 许可与出处：歌词文本处理的规则是从 163MusicLyrics 移植的，
+                    下载音质与网易云账号这两块参考了 FusionMusicPlayer */}
                 <Credit
                     items={[
                         {label: '文本处理', value: 'Apache-2.0', sub: '移植自 163MusicLyrics'},
+                        {label: '下载音质 / 账号', value: 'GPL-3.0', sub: '参考了 FusionMusicPlayer'},
                     ]}
                 >
                     移植自{' '}
                     <Upstream href="https://github.com/jitwxs/163MusicLyrics">jitwxs/163MusicLyrics</Upstream>
-                    （Apache-2.0）。
+                    （Apache-2.0）；下载档位与回退链、降级如实上报、会员标签与凭据续期参考了{' '}
+                    <Upstream href="https://github.com/Janson20/FusionMusicPlayer">
+                        Janson20/FusionMusicPlayer
+                    </Upstream>
+                    （GPL-3.0，照它的做法自行实现，未拷贝其代码）。
                 </Credit>
             </div>
         </div>

@@ -28,6 +28,8 @@ export interface AppConfig {
     downloadDir?: string
     bilibiliCookie?: string
     neteaseCookie?: string
+    /** 网易云 MUSIC_U 的过期时间（unix 秒，0 / 缺失表示没记过）；界面显示与自动续期用它 */
+    neteaseCookieExpire?: number
     proxy?: string
     /* ── 页面自己那份设置（键名见 `readLegacy`）── */
     audio?: Record<string, unknown>
