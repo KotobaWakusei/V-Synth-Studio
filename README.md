@@ -44,6 +44,11 @@
 > 8 GB，其中模型权重是非商业许可、不允许随源码分发）——在对应页面点「安装扩展包」按需下载，
 > 支持暂停与续传，也能一键删除。
 >
+> 这些包放在本仓的 [release `modules`](https://github.com/QingMu39-Gao/V-Synth-Studio/releases/tag/modules)
+> 上（runtime 是 6 卷分卷上传，程序自己按卷下、拼起来解）。GitHub 的 release 在国内常连不上，
+> 所以程序会先按 <https://git.hiwiki.org/zh-CN/mirrors> 的名单在**本机**实测几面镜像、
+> 挑最快的那面下；想强制走 GitHub 直连，设环境变量 `VSS_GH_MIRROR=off`。
+>
 > **这 8 GB 装在哪可以自己选**：第一次点「安装扩展包」时会问一次（也能随时在
 > 「设置 → 扩展包目录」里改），C 盘紧张就把它们放到别的盘。换目录**只改落点、不搬文件**，
 > 原位置里那份会留在那儿、由你自己清掉。

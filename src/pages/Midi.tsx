@@ -28,7 +28,7 @@ import {useI18n} from '@/lib/i18n'
  *   * **没有「服务起没起」**，也没有启动按钮。`status.running` 装的是「正在跑的那次
  *     任务 id」（同时只允许一个），不是服务的生死。
  *   * **第一次用要下 364 MB 模型包**（官方 ONNX 导出：三个 `.onnx` + `config.json`，
- *     `midi_transcribe.rs::MODEL_URL`）。权重是 **CC BY-NC-SA 4.0（非商业）**，
+ *     `midi_transcribe.rs::GAME_ZIP`）。权重是 **CC BY-NC-SA 4.0（非商业）**，
  *     不随包发 —— 界面上必须把许可写出来。
  *   * **动态库随包分发**：ONNX Runtime 由 `tools/fetch_tools.mjs` 补齐、经
  *     `bundle.resources` 进安装包，运行期不下载。

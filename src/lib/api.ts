@@ -750,8 +750,8 @@ export interface SvsepModels {
     expectedBytes: number
     /**
      * 压缩包体积（真正要下的字节）。
-     * ⚠️ 后端目前**只发 `expectedBytes`**；这个字段是照契约留的，补上之后界面上的
-     * 「要下多少」自动变准（`lib/useInstaller.ts` 的 `downloadBytes` 就是这条回退）。
+     * ⚠️ **不是** `expectedBytes`（那是解压后占多大）—— 拿错会把 4.9 GB 说成 7.9 GB。
+     * 运行时的包是**分卷**上传的，这个数是各卷之和。
      */
     zipBytes?: number
     downloadUrl: string

@@ -87,16 +87,14 @@ fn note_progress(got: u64, total: Option<u64>, stage: crate::svsep::Stage) {
     );
 }
 
-/// 新建下载任务时要挂上去的续传链接（`DownloadCtl::resume_url`）。
+/// 这一次能不能接着下：盘上那半个包**就是这个包的**才算数。
 ///
-/// 续传必须拿**暂停时那一条链接**发 Range，不能现查配置：用户在暂停期间改了
-/// `MODEL_URL` 的话，接着下的会是另一个包的文件，拼出来的 zip 要到解压时才炸。
-///
-/// ⚠️ **这个记忆只在内存里，重启就没了** —— 而盘上那半个包还在。所以「能不能
-/// 接着下」的判据不看它，看盘（`svsep.rs::resume_point`，旁边那个 `.part.url`
-/// 记号才是持久的出处）；这里只是把盘上的结论翻成 `DownloadCtl` 要的形状。
-fn resume_for(kind: &str, ext: &std::path::Path, url: &str) -> Option<String> {
-    crate::svsep::resume_point(ext, kind, url).map(|_| url.to_string())
+/// 判据是盘（`svsep::resume_point` 逐卷核对 `.part.url` 记号），不是内存里的记号
+/// —— 进程重启之后内存里什么都没了，而几个 GB 的半个包还在盘上。
+/// ⚠️ 记号写着**别的链接**（换了发布点）时这里回 `false`：接上去会拼出坏包，
+/// 而要等到解压才炸。
+fn resume_for(kind: &str, ext: &std::path::Path) -> bool {
+    crate::svsep::resume_point(ext, kind).is_some()
 }
 
 /// 这一次运行要用的扩展包根。**命令层一律从这里取**，别自己拼可写目录。
@@ -113,14 +111,9 @@ fn download_state(ext: &std::path::Path) -> Value {
     ⚠️ **判据是盘上的半个包，不是内存里的记号**：`DL_KIND` 是「此刻在下的包」，
     下载任务一收场就被清成 `None`，答不了「收场之后还能不能续传」；内存记号还会
     随进程一起没了，而盘上那几 GB 的半个包还在。 */
-    let paused = ["runtime", "models"].iter().find_map(|k| {
-        let url = if *k == "runtime" {
-            crate::svsep::runtime_url()
-        } else {
-            crate::svsep::model_url()
-        };
-        crate::svsep::resume_point(ext, k, &url).map(|n| (*k, n))
-    });
+    let paused = ["runtime", "models"]
+        .iter()
+        .find_map(|k| crate::svsep::resume_point(ext, k).map(|n| (*k, n)));
     let (paused_kind, paused_bytes) = match paused {
         Some((k, n)) => (Some(k), n),
         None => (None, 0),
@@ -282,15 +275,16 @@ pub async fn svsep_stop(st: super::St<'_>) -> Cmd {
 #[tauri::command]
 pub async fn svsep_models_download(st: super::St<'_>) -> Cmd {
     let ext = ext_dir(st.inner());
-    let url = crate::svsep::model_url();
-    let resume = resume_for("models", &ext, &url);
+    let resume = resume_for("models", &ext);
     spawn_download("models", async move {
         let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, resume);
-        let out = crate::svsep::download_models(&ext, &url, &ctl, note_progress).await;
+        // ⚠️ 链接传空串 = 用表里那一条（`MODEL_PARTS`）。要整批顶掉发布点就设
+        //    `VSS_MODULES_BASE`，别在这儿写死一个地址。
+        let out = crate::svsep::download_models(&ext, "", &ctl, note_progress).await;
         // 暂停了就留着记号（下次接着下要用）；下完 / 停止 / 出错都不用留。
         // ⚠️ 「下完」到底是哪一种要现查 —— `ctl.paused()` 只有暂停为真，但它
         //    分不出 Done 与 Cancelled，所以这里再问一次盘上的 `.part` 还在不在。
-        if crate::svsep::resume_point(&ext, "models", &url).is_none() {
+        if crate::svsep::resume_point(&ext, "models").is_none() {
             crate::svsep::clear_resume_marker(&ext, "models");
         }
         out
@@ -308,13 +302,12 @@ pub async fn svsep_models_download(st: super::St<'_>) -> Cmd {
 pub async fn svsep_runtime_download(st: super::St<'_>) -> Cmd {
     require_local_engine()?;
     let ext = ext_dir(st.inner());
-    let url = crate::svsep::runtime_url();
-    let resume = resume_for("runtime", &ext, &url);
+    let resume = resume_for("runtime", &ext);
     let ext2 = ext.clone();
     spawn_download("runtime", async move {
         let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, resume);
-        let out = crate::svsep::download_runtime(&ext2, &url, &ctl, note_progress).await;
-        if crate::svsep::resume_point(&ext2, "runtime", &url).is_none() {
+        let out = crate::svsep::download_runtime(&ext2, &ctl, note_progress).await;
+        if crate::svsep::resume_point(&ext2, "runtime").is_none() {
             crate::svsep::clear_resume_marker(&ext2, "runtime");
         }
         out
@@ -462,7 +455,7 @@ fn start_dml_download(st: &Arc<super::AppState>) -> Result<Value, String> {
     所以 `spawn_download` 那个「返回值必须是 FetchOutcome」的签名套不上，
     这里自己收尾 —— 但**进度仍然写同一组 `DL_*`**，界面不用学第二套。 */
     tokio::spawn(async move {
-        let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, None);
+        let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, false);
         let res = crate::svsep::download_dml(&ext, &ctl, note_progress).await;
         if res.is_ok() {
             crate::svsep::apply_infer_mode(&ext);

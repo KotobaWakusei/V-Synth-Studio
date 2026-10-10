@@ -82,55 +82,80 @@ const MODEL_INDEX_FILES: &[&str] = &[
 /// 换版本而变，只有「两个入口文件存在」是稳的。
 pub const RUNTIME_BYTES: u64 = 7_855_000_000;
 
-/// 运行时**压缩包**的大小（CDN 上那个 `runtime.zip`，实测 4.94 GB）。
+/// 运行时**压缩包**的总大小（= 各分卷之和，4.94 GB）。
 ///
 /// 和上面那个 `RUNTIME_BYTES`（解压后）是两个数，别混：两处写反了会让界面
 /// 把「要下多少」说成 7.9 GB。
+/// ⚠️ 它必须等于 `RUNTIME_PARTS` 的字节数之和（有单测钉着）—— 换包时一起改。
 pub const RUNTIME_ZIP_BYTES: u64 = 4_941_164_107;
 /// 模型压缩包的实测大小（`models.zip`，解压后见 `models_status` 的 `expectedBytes`）。
 pub const MODEL_ZIP_BYTES: u64 = 484_976_642;
 
-/// 运行时下载链接（123 云盘 CDN，用户自己上传的包）。
+/// 扩展包的发布点：我们自己的 GitHub release（tag = `modules`）。
 ///
-/// ⚠️ 末尾那个 `#` **不要删**：那是用户给的原始链接，去掉它可能 404。
-/// ⚠️ 换链接之前先想清楚：盘上那个 `.part` 旁边的 `.part.url` 记着旧链接，
-/// 换了之后旧的半个包会被当成「别的包的」丢掉、从头下（见 `stored_resume`）。
-pub const RUNTIME_URL: &str =
-    "https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio/runtime.zip#";
+/// 为什么是 release 而不是网盘：资产不可变、能按名字直取、换盘不会失效。
+/// ⚠️ 境内直连常不通（release 会 302 到 `objects.githubusercontent.com`），所以
+/// **真正取字节的地址由 `crate::ghmirror` 每轮现挑一面镜像** —— 那一层在
+/// `crate::download` 里，这里写的永远是 github.com 上的规范链接。
+const RELEASE_DIR: &str =
+    "https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules";
 
-/// 模型下载链接（同上，123 云盘 CDN）。
-///
-/// 界面上「下载模型」按钮在没有链接时会明确说「还没配置下载地址」，
-/// 而不是转圈然后失败。
-pub const MODEL_URL: &str =
-    "https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio/models.zip#";
+/// 发布点的落地页（给「这些包是从哪儿来的」一个能点开的答案）。
+pub const RELEASE_PAGE: &str =
+    "https://github.com/QingMu39-Gao/V-Synth-Studio/releases/tag/modules";
 
-/// **只给开发机用的临时覆盖**（`VSS_SVSEP_MODEL_URL` / `VSS_SVSEP_RUNTIME_URL`）。
+/// 一个包在发布点上的一个文件。单文件包就是一项；分卷包按**拼装顺序**排开。
+struct Part {
+    /// release 资产名（GitHub 上就叫这个，下载时按它拼 URL）
+    name: &'static str,
+    /// 实测字节数 —— **只进进度分母**。「这一卷下完没有」不看它（见 `fetch_bundle`
+    /// 里那条 `416` 的路），所以换分卷大小只影响进度条，不会把下载卡死。
+    bytes: u64,
+}
+
+/// 音轨分离的模型包：一个文件。
+const MODEL_PARTS: &[Part] = &[Part {
+    name: "models.zip",
+    bytes: MODEL_ZIP_BYTES,
+}];
+
+/// 音轨分离的运行时 —— **分卷**。
 ///
-/// 为什么留这个口子：这两个链接是编译期常量，而「暂停 → 续传」「下载中点删除」
-/// 这类事**必须在真下载跑着的时候**才能验。要是每次都改常量再重编，测完还得
-/// 记得改回来 —— 漏一次就会把开发机地址发出去。用环境变量就在进程外解决。
-/// ⚠️ 发布版**不要设这两个变量**，设了就是拿本地文件当下载源。
-#[cfg(debug_assertions)]
-fn url_override(key: &str, default: &'static str) -> String {
-    match std::env::var(key) {
-        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => default.to_string(),
+/// ⚠️ GitHub 单个资产上限 2 GB，4.94 GB 的 runtime 只能拆开传。拆法由
+/// `tools/split_volumes.mjs` 定死：**按字节切开**（每卷 0.9 GiB，最后一卷是尾巴）。
+/// 名字与顺序必须与 `tools/assets.mjs` 的 `volumes` 逐字一致，少任何一卷都拼不出 zip
+/// —— `Volumes` 会当场说是缺哪一卷。
+/// ⚠️ **不能用 WinZip / Bandizip 那种「跨卷 zip」**：那是另一种格式（中央目录里记的是
+/// 「第几卷 + 卷内偏移」），各卷首尾相接不是合法 zip，几 GB 下完才报「读不出中央目录」。
+/// ⚠️ 重新分卷就要同步改这张表与上面的 `RUNTIME_ZIP_BYTES`（有单测钉着两者相等），
+/// 那两行 `tools/split_volumes.mjs` 跑完会直接打出来。
+const RUNTIME_PARTS: &[Part] = &[
+    Part { name: "runtime.z01", bytes: 966_367_641 },
+    Part { name: "runtime.z02", bytes: 966_367_641 },
+    Part { name: "runtime.z03", bytes: 966_367_641 },
+    Part { name: "runtime.z04", bytes: 966_367_641 },
+    Part { name: "runtime.z05", bytes: 966_367_641 },
+    Part { name: "runtime.zip", bytes: 109_325_902 },
+];
+
+/// 发布点根目录。
+///
+/// 开发机要拿本地 `python -m http.server` 顶掉它时设 `VSS_MODULES_BASE`
+/// （**只有 debug 构建认**；发布版永远走 GitHub）—— 那个目录里要摆着同名的那几个文件。
+pub fn release_base() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(v) = std::env::var("VSS_MODULES_BASE") {
+        let v = v.trim().trim_end_matches('/').to_string();
+        if !v.is_empty() {
+            return v;
+        }
     }
-}
-#[cfg(not(debug_assertions))]
-fn url_override(_key: &str, default: &'static str) -> String {
-    default.to_string()
+    RELEASE_DIR.to_string()
 }
 
-/// 这一次真的要用的模型下载地址（常量，或开发机用环境变量顶掉的那个）。
-pub fn model_url() -> String {
-    url_override("VSS_SVSEP_MODEL_URL", MODEL_URL)
-}
-
-/// 这一次真的要用的运行时下载地址。
-pub fn runtime_url() -> String {
-    url_override("VSS_SVSEP_RUNTIME_URL", RUNTIME_URL)
+/// 某个资产在发布点上的规范链接。
+pub fn release_url(name: &str) -> String {
+    format!("{}/{}", release_base(), name)
 }
 
 /* ══════════════════════════════════ 路径 ══════════════════════════════════ */
@@ -554,9 +579,8 @@ pub fn runtime_status(ext: &Path) -> Value {
     json!({
         "dir": dir.to_string_lossy(),
         "ready": runtime_ready(ext),
-        // ⚠️ 用 `runtime_url()` 不用常量：开发机用环境变量顶掉链接时，界面显示的
-        //    也得是那个顶掉的地址，否则会出现「界面说没配、其实配了」这种鬼状态。
-        "downloadUrl": runtime_url(),
+        // 给排查用的「这几个包是从哪儿来的」。界面不显示它，只显示体积与进度
+        "downloadUrl": RELEASE_PAGE,
         // 「大概多大」用于展示与进度百分比，不是判据
         "expectedBytes": RUNTIME_BYTES as f64,
         /* 要下多少（压缩包）。界面上的「安装扩展包（约 X）」用的是它 ——
@@ -619,7 +643,7 @@ pub fn models_status(ext: &Path) -> Value {
         "expectedBytes": (UVR_MODEL_FULL + ROFORMER_MODEL_FULL) as f64,
         // 要下多少（压缩包）；理由同 `runtime_status` 里那条
         "zipBytes": MODEL_ZIP_BYTES as f64,
-        "downloadUrl": model_url(),
+        "downloadUrl": RELEASE_PAGE,
         "items": [
             { "key": "uvr", "name": UVR_MODEL, "label": "二轨 · 人声 / 伴奏",
               "state": uvr_state, "size": uvr_size, "expectedSize": UVR_MODEL_FULL },
@@ -632,17 +656,13 @@ pub fn models_status(ext: &Path) -> Value {
 
 /* ══════════════════════ 半个包（暂停留下的续传点）══════════════════════ */
 
-/// 某个包没下完时 `.part` 落在哪。
-///
-/// 两个包的落点不一样（模型的 `dest` 是 `models/`，运行时的是 `svsep/` 本身），
-/// 所以别自己拼 `dest.join(...)` —— 走 `Bundle`，落点只有一个定义处。
-pub fn part_path(ext: &Path, kind: &str) -> Option<PathBuf> {
-    let b = match kind {
-        "models" => Bundle::models(ext, None),
-        "runtime" => Bundle::runtime(ext, None),
-        _ => return None,
-    };
-    Some(b.dest.join(format!("{}.part", b.zip_name)))
+/// 「这个种类对应哪个包」。认不出就 `None`（拼错 kind 不该 panic，也不该乱指一个目录）。
+fn bundle_of(ext: &Path, kind: &str) -> Option<Bundle<'static>> {
+    match kind {
+        "models" => Some(Bundle::models(ext, None)),
+        "runtime" => Some(Bundle::runtime(ext)),
+        _ => None,
+    }
 }
 
 /* `.part.url` 记号（「这半个包是谁的」）的实现只有一份，在 `crate::download`
@@ -659,23 +679,31 @@ fn stored_resume(part: &Path, url: &str) -> bool {
     crate::download::stored_resume(part, url)
 }
 
-/// 这个包有没有「可以接着下」的半个包，有就回它的字节数。
+/// 这个包有没有「可以接着下」的半个包，有就回盘上已经有的字节数。
 ///
 /// ⚠️ **看盘，不看内存里的记号**：工作站在下载中途被关掉、或者进程重启之后，
-/// 那个 `(种类, 链接)` 的记忆就没了，而 4.7 GB 的半个包还在盘上 —— 只看内存
-/// 会让界面以为「没下过」，用户一点就从零开始，白下几个 GB。
-pub fn resume_point(ext: &Path, kind: &str, url: &str) -> Option<u64> {
-    let part = part_path(ext, kind)?;
-    if !stored_resume(&part, url) {
-        return None;
+/// 那个记忆就没了，而几 GB 的半个包还在盘上 —— 只看内存会让界面以为「没下过」，
+/// 用户一点就从零开始，白下几个 GB。
+/// ⚠️ 逐卷核对记号：写着**别的链接**的那一卷不算数（它会拼出坏包，见 `stored_resume`），
+/// 其余几卷照样算 —— 分卷是「有几卷算几卷」。
+pub fn resume_point(ext: &Path, kind: &str) -> Option<u64> {
+    let b = bundle_of(ext, kind)?;
+    let mut total = 0u64;
+    for (url, part) in b.files() {
+        if !stored_resume(&part, &url) {
+            continue;
+        }
+        total += file_size(&part);
     }
-    let n = file_size(&part);
-    (n > 0).then_some(n)
+    (total > 0).then_some(total)
 }
 
 /// 收场之后收拾记号：暂停留着（下次还要用），下完/出错/停止都删掉。
 pub fn clear_resume_marker(ext: &Path, kind: &str) {
-    if let Some(part) = part_path(ext, kind) {
+    let Some(b) = bundle_of(ext, kind) else {
+        return;
+    };
+    for (_, part) in b.files() {
         let _ = std::fs::remove_file(url_marker(&part));
     }
 }
@@ -1285,22 +1313,27 @@ pub enum FetchOutcome {
 pub struct DownloadCtl {
     pause: &'static AtomicBool,
     cancel: &'static AtomicBool,
-    /// 续传时要用的链接（`None` = 这次不许续传，`.part` 视为无效）
-    pub resume_url: Option<String>,
+    /// 调用方授权「接着下盘上那批 `.part`」。
+    ///
+    /// 能不能续传**不是包自己的属性**：它取决于「盘上那半个包是不是这个包的」，
+    /// 而那只有调用方查得到（`resume_point`）。给 `false` 时 `fetch_bundle` 会把
+    /// 旧的 `.part` 全删掉、从头下 —— 拿别人的半个包接 `Range` 会拼出坏 zip，
+    /// 而且要到解压时才炸。
+    pub resume: bool,
 }
 
 impl DownloadCtl {
     pub fn new(
         pause: &'static AtomicBool,
         cancel: &'static AtomicBool,
-        resume_url: Option<String>,
+        resume: bool,
     ) -> Self {
         pause.store(false, Ordering::Relaxed);
         cancel.store(false, Ordering::Relaxed);
         Self {
             pause,
             cancel,
-            resume_url: resume_url.map(|u| u.trim().to_string()),
+            resume,
         }
     }
 
@@ -1325,55 +1358,61 @@ impl DownloadCtl {
     }
 }
 
-/// 一个可下载的包：链接、落点、zip 里那一层壳的名字、出错时怎么称呼它。
+/// 一个可下载的包：发布点上的那几个文件、落点、zip 里那一层壳的名字。
 struct Bundle<'a> {
-    /// svsep.rs 里那个常量（`MODEL_URL` / `RUNTIME_URL`）
-    const_name: &'static str,
     /// 界面上的名字，用在错误文案里
     label: &'static str,
-    /// 编译期那条链接（现在都是空串，等用户上传后填）
-    default_url: &'static str,
-    /// 调用方临时覆盖的链接（设置页填的、或者测试传的）
+    /// 发布点上的文件（单文件包就一项；分卷包按拼装顺序排开）
+    parts: &'static [Part],
+    /// 调用方临时顶掉的链接。**只有单文件包能用**：开发机与单测指一个本地
+    /// http 服务器（分卷包要顶掉整批，那是 `VSS_MODULES_BASE` 的事）。
     url: Option<&'a str>,
     /// 临时 zip 放哪、解到哪
     dest: PathBuf,
     /// 从条目名里剥掉的一层（见 `extract_zip`）
     strip: &'static str,
-    /// 解压完删掉 zip 时，它叫什么
-    zip_name: &'static str,
 }
 
 impl<'a> Bundle<'a> {
     fn models(ext: &Path, url: Option<&'a str>) -> Self {
         Self {
-            const_name: "MODEL_URL",
             label: "模型",
-            default_url: MODEL_URL,
+            parts: MODEL_PARTS,
             url,
             dest: models_dir(ext),
             strip: "models/",
-            zip_name: "svsep-models.zip",
         }
     }
 
-    fn runtime(ext: &Path, url: Option<&'a str>) -> Self {
+    fn runtime(ext: &Path) -> Self {
         Self {
-            const_name: "RUNTIME_URL",
             label: "运行时",
-            default_url: RUNTIME_URL,
-            url,
+            parts: RUNTIME_PARTS,
+            url: None,
             dest: runtime_base(ext),
             strip: "", // 留着 runtime/ 这一层：那边要的正是 runtime/python.exe
-            zip_name: "svsep-runtime.zip",
         }
     }
 
-    /// 实际用哪条链接：调用方给的优先，空串等于没给
-    fn resolved_url(&self) -> &str {
-        match self.url {
-            Some(u) if !u.trim().is_empty() => u.trim(),
-            _ => self.default_url.trim(),
-        }
+    /// 这一次要取的每一个文件：`(规范链接, 本地 `.part` 落点)`，按拼装顺序。
+    ///
+    /// ⚠️ 本地名字用**资产名**加 `.part`：一来离「release 上那个文件」一眼对得上，
+    /// 二来都以 `.part` 收尾 —— `delete_dependencies` 的清扫就是按这个后缀认的
+    /// （拼成 `xxx.part1` 会让几 GB 的半个包躲过清扫）。
+    fn files(&self) -> Vec<(String, PathBuf)> {
+        let override_url = self.url.map(str::trim).filter(|u| !u.is_empty());
+        self.parts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let url = match override_url {
+                    // 单文件包的临时顶替。分卷包只可能来自表里（见字段注释）
+                    Some(u) if i == 0 => u.to_string(),
+                    _ => release_url(p.name),
+                };
+                (url, self.dest.join(format!("{}.part", p.name)))
+            })
+            .collect()
     }
 }
 
@@ -1393,7 +1432,7 @@ fn control(ctl: &DownloadCtl) -> crate::download::Control<'_> {
     crate::download::Control::new(|| ctl.check(), || ctl.cancelled())
 }
 
-/// 盘上那个 `.part` 是不是**一整个 zip**（而不是下了一半就断的）。
+/// 盘上那些 `.part` 拼起来是不是**一整个 zip**（而不是下了一半就断的）。
 ///
 /// 什么时候会是「一整包」：字节都下完了，收尾（解压）没跑完 —— 解压途中
 /// 关窗口、解压报错、磁盘满。`.part` 与旁边的链接记号都还在，于是「点继续下载」
@@ -1401,158 +1440,177 @@ fn control(ctl: &DownloadCtl) -> crate::download::Control<'_> {
 /// 回 200（不认 Range 的服务器）就把几个 GB **从头下一遍**。
 /// 包既然已经完整，一个字节都不该再要 —— 直接去解压（见 `fetch_bundle` 开头）。
 ///
-/// 判据 = 中央目录读得出来，而且**每个条目的数据段都真的落在文件里**
-/// （`data_offset + 30 + compressed_size <= 文件大小`；本地头里的 name/extra
-/// 长度 ≥ 0，所以这是个放宽版判据）。半截包连中央目录都读不出来 —— 目录在文件
-/// 末尾，压根没下到 —— 第一步就返回 false 了。
+/// ⚠️ 分卷时判据与单文件**一模一样**：分卷拼起来就是一个 zip，`Volumes` 让它
+/// 看起来就是一个文件。少任何一卷都读不出中央目录，也就不是「一整包」。
 ///
 /// ⚠️ 成本 = 读一遍中央目录（runtime 那个约 2.4 MB），所以只在**点下载时**调，
 ///    别放进每 2 秒一次的状态轮询里。
-fn part_is_whole_zip(zip_path: &Path) -> bool {
-    let Ok(f) = std::fs::File::open(zip_path) else {
+fn pack_is_whole_zip(parts: &[PathBuf]) -> bool {
+    let Ok(v) = Volumes::open(parts) else {
         return false;
     };
-    /* ⚠️ 判据就是「中央目录读得出来」，**不加**「每个条目的数据段都落在文件里」
-       的逐个检查：中央目录在文件**末尾**，而「下载没下完」的第一个症状就是
-       EOCD 被削掉 —— 两种判据在整包的**每一个截断点**上结论都一致，那条检查
-       想挡的东西已经被这一步挡住了，而它要为两万多个条目各做一次比较。
+    reader_is_whole_zip(v)
+}
 
-       ⚠️ 但别把它当成「更强的检查」：它比的是**文件长度**，不是「内容有没有洞」。
-       那半个包若是被乱序写到文件里的（`.part` 断点续传就是这么写的），长度够、
-       EOCD 也在，两个判据都会说「是一整包」。真正该防的那种坏包由解压时的
-       CRC 校验兜住（见 `extract_zip`）。 */
-    let Ok(z) = zip::ZipArchive::new(f) else {
+/// 「这个读者手里的字节是一个完整的 zip」—— 判据就是**中央目录读得出来**。
+///
+/// ⚠️ **不加**「每个条目的数据段都落在文件里」的逐个检查：中央目录在文件
+/// **末尾**，而「下载没下完」的第一个症状就是 EOCD 被削掉 —— 两种判据在整包的
+/// **每一个截断点**上结论都一致，那条检查想挡的东西已经被这一步挡住了，而它要为
+/// 两万多个条目各做一次比较。
+///
+/// ⚠️ 但别把它当成「更强的检查」：它比的是**文件长度**，不是「内容有没有洞」。
+/// 那半个包若是被乱序写到文件里的（`.part` 断点续传就是这么写的），长度够、
+/// EOCD 也在，两个判据都会说「是一整包」。真正该防的那种坏包由解压时的
+/// CRC 校验兜住（见 `extract_zip`）。
+fn reader_is_whole_zip<R: std::io::Read + std::io::Seek>(reader: R) -> bool {
+    let Ok(z) = zip::ZipArchive::new(reader) else {
         return false;
     };
     !z.is_empty()
 }
 
+/// 单个 `.part` 的版本 —— 只有单测在用（生产路径一律走 [`pack_is_whole_zip`]，
+/// 分卷是常态、单文件只是它的一元情形）。
+#[cfg(test)]
+fn part_is_whole_zip(zip_path: &Path) -> bool {
+    pack_is_whole_zip(&[zip_path.to_path_buf()])
+}
+
 /// 下载一个包、解压、清掉临时文件。`download_models` / `download_runtime` 都走这里。
 ///
 /// 三种收场，见 `FetchOutcome`：下完解好 / 用户按了暂停（留着 `.part`，下次接着下）
-/// / 用户按了停止（删掉 `.part`，下次从头下）。
+/// / 用户按了停止（删掉所有 `.part`，下次从头下）。
+///
+/// **分卷与单文件走的是同一条路**：`Bundle::files()` 给出 `(规范链接, 本地 .part)`，
+/// 一个接一个下（每卷各自续传），最后用 `Volumes` 把它们当成一个 zip 解开。
 ///
 /// ⚠️ **中途断了会自己接着下**：链接被掐断时歇 10 秒再发一次请求，最多 5 轮
 ///    （`Retry::BIG_PACK`），每轮都带 `Range` 从**盘上已有的字节**接着下（不是从头下）。
 ///    5 轮都不成才报错，那半个包留着 —— 界面上还能点「继续下载」接着下。
+///    ⚠️ 卡在某一卷上时，`crate::download` 会**换一面镜像**再试；换的是取字节的
+///    地址，规范链接没变，所以半卷照样接着下。
 ///
 /// ⚠️ **续传是按 `.part` 在不在判的**：文件在那儿就发 `Range: bytes=<已有>-`，
 ///    服务端回 206 就从那儿接着写。回到 200（不认 Range 的服务器，比如某些
 ///    简单的静态托管）就**从头写**：追加会得到一个前一段 + 整段拼起来的坏 zip，
 ///    而且要到解压时才炸 —— 那比重新下更糟。
-/// ⚠️ 下载途中写的是 `<dest>/<zip_name>.part`，**不是 `.zip`** —— 万一用户
+/// ⚠️ 下载途中写的是 `<dest>/<资产名>.part`，**不是 `.zip`** —— 万一用户
 ///    中途去点了「开始分离」，`runtime_ready()` 看到的是半个 zip，不会把它
 ///    当成装好了。
-/// ⚠️ **开工前先看盘上那个 `.part` 是不是一整包**（下载完了、解压没收尾）：
-///    是就一个字节都不再要，直接解压（见 `part_is_whole_zip`）。
+/// ⚠️ **开工前先看盘上那些 `.part` 拼不拼得出一整包**（下载完了、解压没收尾）：
+///    是就一个字节都不再要，直接解压（见 `pack_is_whole_zip`）。
 async fn fetch_bundle(
     b: &Bundle<'_>,
     ctl: &DownloadCtl,
     on_progress: &(impl Fn(u64, Option<u64>, Stage) + Send + Sync),
 ) -> Result<FetchOutcome, String> {
-    let url = b.resolved_url();
-    if url.is_empty() {
-        return Err(format!(
-            "还没配置{}下载地址。打包好的 {} 需要先传到服务器，\
-             再把地址填进 svsep.rs 的 {}。",
-            b.label, b.zip_name, b.const_name
-        ));
-    }
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err(format!("{}下载地址必须是 http(s) 链接", b.label));
+    let files = b.files();
+    for (url, _) in &files {
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            return Err(format!("{}下载地址必须是 http(s) 链接：{url}", b.label));
+        }
     }
 
     std::fs::create_dir_all(&b.dest).map_err(|e| format!("建目录失败：{e}"))?;
-    let zip_path = b.dest.join(format!("{}.part", b.zip_name));
+    let paths: Vec<PathBuf> = files.iter().map(|(_, p)| p.clone()).collect();
 
-    // 已有多少字节（上次暂停留下的）。调用方说不能续传时当成 0，并且把旧的那个
-    // 半个文件删掉 —— 留着它只会让下次误判。
-    //
-    // ⚠️ 光有 `resume_url` 还不够：那个链接必须和 `.part` 旁边记的**对得上**，
-    //    否则这半个包是别的文件的，接上去会拼出一个坏 zip（见 `stored_resume`）。
-    /* ★ 盘上那个 `.part` 要是**一整包**，一个字节都别再要 —— 直接去解压。
-
-    什么情况会是「一整包」：字节都下完了，但收尾（解压）没跑完 —— 解压途中关窗口、
-    解压报错、磁盘满。`.part` 与链接记号都还在，于是「点继续下载」会带着
-    `Range: bytes=<整包长>-` 再发一次请求，把几 GB 从头再下一遍。
-    ⚠️ 这个判断必须排在「不续传就把 `.part` 删掉」**之前**：那条会把一整包也删了。
+    /* ★ 盘上那些 `.part` 拼得出一整包，就一个字节都别再要 —— 直接去解压。
+    ⚠️ 这个判断必须排在「不续传就把旧 `.part` 删掉」**之前**：那条会把一整包也删了。
     记号在不在都不影响这个判断 —— 包是完整的，记号只管续传。 */
-    let whole = part_is_whole_zip(&zip_path);
+    let whole = pack_is_whole_zip(&paths);
 
-    /* 真的去拉字节 —— 走 `crate::download`，与 bili 的视频下载共用同一份。这里
-       只剩「包在哪儿、叫什么、续传点认不认」这三件**这个宿主特有**的事。 */
-    let outcome = if whole {
-        // 一整包已经躺在盘上了：不发请求、不写记号，直接去解压
-        crate::download::Outcome::Done { bytes: file_size(&zip_path) }
-    } else {
-        /* ⚠️ **调用方说了不许续传就把旧 `.part` 删掉。**
-        这是 `DownloadCtl::resume_url` 的全部含义：调用方查过盘（`resume_for`），
-        只有「上次就是暂停在这个包、同一条链接上」才会给 `Some(url)`。给 `None`
-        说明这半个包要么属于别的链接、要么上次是出错/停止结束的 —— 留着它接新
-        链接的 `Range` 会拼出坏包（要到解压才炸）。
+    if !whole && !ctl.resume {
+        /* ⚠️ **调用方没授权续传就把旧的 `.part` 全删掉。**
+        调用方查过盘（`resume_for` → `resume_point`），只有「上次就是暂停在这个包、
+        还是那一批规范链接」才会说 `resume = true`。说 `false` 说明这些半个包要么属于
+        别的链接、要么上次是出错/停止结束的 —— 留着接新链接的 `Range` 会拼出坏包
+        （要到解压才炸）。
 
-        ⚠️ 删了之后仍然把 `resume` 置 `true`（下面那行）：**轮内重试**必须能从
-        盘上接着下。这两件事不同 —— `resume_url` 管「认不认开工前那个旧的」，
-        `resume` 管「断了之后连不连着下」。合并成一个就会让「调用方没指定链接时
-        重试也从头下」，白烧用户几个 GB。 */
-        if ctl.resume_url.is_none() {
-            let _ = std::fs::remove_file(&zip_path);
-            let _ = std::fs::remove_file(url_marker(&zip_path));
+        ⚠️ 删了之后**轮内重试照样续传**：那是引擎自己的事（它只看盘）。这两件事不同
+        —— `resume` 管「认不认开工前那一批」，引擎管「断了之后连不连着下」。 */
+        for (_, p) in &files {
+            let _ = std::fs::remove_file(p);
+            let _ = std::fs::remove_file(url_marker(p));
         }
-        let base = crate::download::Request {
-            url,
-            label: b.label,
-            part: &zip_path,
-            headers: &[],
-            // 单流：这几 GB 的包要的是「断了能接着下」，不是并行
-            // 几 GB 的包：断了接着下（`Resumable` 自带「不 probe」，见 Shape）
-            shape: crate::download::Shape::Resumable,
-            client: crate::download::default_client(),
-            retry: crate::download::Retry::BIG_PACK,
-            expect: None,
-        };
-        let note = |got: u64, total: Option<u64>, stage: Stage| on_progress(got, total, stage);
-        match crate::download::download(&base, &control(ctl), &note).await {
-            Ok(o) => o,
-            Err(e) => {
-                /* ⚠️ 万一这一轮其实已经把整包下到手、只是收尾报了错：就地改判成
-                   「下完了」去解压。不改判的话，下次点「继续下载」会带着「整包长」
-                   的 Range 再发一次请求 —— 那是把几个 GB 从头下一遍。 */
-                if part_is_whole_zip(&zip_path) {
-                    crate::download::Outcome::Done { bytes: file_size(&zip_path) }
-                } else {
-                    /* ⚠️ 解压失败/下载失败时**不删** `.part`，记号也不删：删掉 =
-                       用户得把几 GB 再下一遍（流量是他自己的）。留着的话界面会显示
-                       「已经下好 N，接着下」，用户再点一次走的是 `part_is_whole_zip`
-                       那条短路。 */
+    }
+
+    if !whole {
+        /* 进度分母 = 表里那些字节数之和。⚠️ 表是**人抄的**，与 release 上真不一样时
+           只让进度条难看一点，不影响成不成 —— 所以下面报进度时按总量夹一下，
+           免得条子冲过 100%。 */
+        let grand_total: u64 = b.parts.iter().map(|p| p.bytes).sum();
+        for (url, path) in &files {
+            // 已经下完的那几卷（分母里的偏移）。卷是按顺序下的，所以这里正好是前缀。
+            let before: u64 = paths
+                .iter()
+                .take_while(|p| *p != path)
+                .map(|p| file_size(p))
+                .sum();
+            /* 真的去拉字节 —— 走 `crate::download`，与 bili 的视频下载共用同一份。
+               这里只剩「这一卷在哪儿、叫什么」这两件**这个宿主特有**的事。 */
+            let req = crate::download::Request {
+                url,
+                label: b.label,
+                part: path,
+                headers: &[],
+                // 单流：这几 GB 的包要的是「断了能接着下」，不是并行
+                shape: crate::download::Shape::Resumable,
+                client: crate::download::default_client(),
+                retry: crate::download::Retry::BIG_PACK,
+                /* ⚠️ **不核对字节数**：`expect` 对不上会把这一轮算成失败，而它拿的
+                   正是上面那张人抄的表 —— 表与 release 差一个字节就等于**永远下不完**。
+                   截断由 reqwest 的流错误（`Content-Length` 不满足）与解压时的
+                   EOCD / CRC 兜住。 */
+                expect: None,
+            };
+            let note = |got: u64, _total: Option<u64>, _stage: Stage| {
+                on_progress((before + got).min(grand_total), Some(grand_total), Stage::Download)
+            };
+            match crate::download::download(&req, &control(ctl), &note).await {
+                Ok(crate::download::Outcome::Done { .. }) => {}
+                Ok(crate::download::Outcome::Paused { .. }) => {
+                    let done: u64 = paths.iter().map(|p| file_size(p)).sum();
+                    return Ok(FetchOutcome::Paused { bytes: done });
+                }
+                Ok(crate::download::Outcome::Cancelled) => {
+                    /* 停止 = 这个包不要了：**所有**分卷一起删。只删当前那一卷的话，
+                       界面上「已经下好 N」还挂着一半，用户下次点「继续下载」又接上。 */
+                    for (_, p) in &files {
+                        let _ = std::fs::remove_file(p);
+                        let _ = std::fs::remove_file(url_marker(p));
+                    }
+                    return Ok(FetchOutcome::Cancelled);
+                }
+                Err(e) => {
+                    /* ⚠️ 万一这一轮其实已经把整包下到手、只是收尾报了错：就地改判成
+                       「下完了」去解压。不改判的话，下次点「继续下载」会带着「整包长」
+                       的 Range 再发一次请求 —— 那是把几个 GB 从头下一遍。 */
+                    if pack_is_whole_zip(&paths) {
+                        break;
+                    }
+                    /* ⚠️ 失败时**不删** `.part`，记号也不删：删掉 = 用户得把几 GB 再下
+                       一遍（流量是他自己的）。留着的话界面会显示「已经下好 N，接着下」。 */
+                    let done: u64 = paths.iter().map(|p| file_size(p)).sum();
                     return Err(format!(
-                        "{e}；已下的 {} 字节留在盘上，下次点「继续下载」从这儿接着下",
-                        file_size(&zip_path)
+                        "{e}；已下的 {done} 字节留在盘上，下次点「继续下载」从这儿接着下"
                     ));
                 }
             }
         }
-    };
-    /* 两种收场直接返回；`Done` 不看字节数 —— 下完就是下完，接下来要拿的是
-       `extract_zip` 报出来的条目数（真正的成果），不是下了多少字节。 */
-    match outcome {
-        crate::download::Outcome::Done { .. } => {}
-        crate::download::Outcome::Paused { bytes } => {
-            return Ok(FetchOutcome::Paused { bytes });
-        }
-        crate::download::Outcome::Cancelled => return Ok(FetchOutcome::Cancelled),
     }
 
-    /* 下面这一段是**解压**、不是下载。`unpack` 负责把阶段切成 `Extract`
+    /* 下面这一段是**解压**、不是下载。`unpack_volumes` 负责把阶段切成 `Extract`
        （界面据此把标签从「正在下载…」改成「正在解压…」），别在调用点各写一遍
        那两行样板，见 `unpack` 的注释。 */
-    let report = unpack(&zip_path, &b.dest, b.strip, on_progress);
-    match report {
+    match unpack_volumes(&paths, &b.dest, b.strip, on_progress) {
         Ok(report) => {
-            // 解好了才删：它有几 GB，留着没用（`.part` 这名字也保证下次不会被当成
+            // 解好了才删：它们有几 GB，留着没用（`.part` 这名字也保证下次不会被当成
             // .zip 用）。记号跟着走 —— 没有「半个包」可续了。
-            let _ = std::fs::remove_file(&zip_path);
-            let _ = std::fs::remove_file(url_marker(&zip_path));
+            for (_, p) in &files {
+                let _ = std::fs::remove_file(p);
+                let _ = std::fs::remove_file(url_marker(p));
+            }
             Ok(FetchOutcome::Done(json!({
                 "ok": true,
                 "dir": b.dest.to_string_lossy(),
@@ -1563,7 +1621,15 @@ async fn fetch_bundle(
         Err(e) => {
             /* ⚠️ 解压失败时**不删** `.part`，记号也不删：删掉 = 用户得把几 GB 再
             下一遍（流量是他自己的）。留着的话界面会显示「已经下好 N，接着下」，
-            用户再点一次走的是 `part_is_whole_zip` 那条短路 —— 不发请求，直接重解。 */
+            用户再点一次走的是 `pack_is_whole_zip` 那条短路 —— 不发请求，直接重解。
+
+            ⚠️ 顺手把镜像的名次推进一格：字节拼出来了却解不开，最可能的原因就是某一面
+            镜像给的**不是这个文件**（`ghmirror` 已经把 HTML 错误页挡在外面，但代理缓存
+            里躺着旧版本、或者取到一半换了内容都是可能的）。不推进的话下次重试还挑
+            同一面，用户会一直卡在同一个错上。 */
+            for (url, _) in &files {
+                crate::ghmirror::discard(url);
+            }
             Err(e)
         }
     }
@@ -1571,8 +1637,9 @@ async fn fetch_bundle(
 
 /// 下载模型 zip 并解压到 `<扩展包根>/svsep/models/`。
 ///
-/// 用户可以暂停 / 停止（`ctl`），暂停后 `.part` 留着、下次 `resume_url` 指同一条
-/// 链接就接着下；停止会把 `.part` 删掉，下次从头下。
+/// 用户可以暂停 / 停止（`ctl`）：暂停把 `.part` 留着，下次点「继续下载」就接着下
+/// （能不能续由 `resume_point` 看盘说了算）；停止会把它删掉，下次从头下。
+/// `url` 传空串 = 用表里那一条，只有单测和开发机才会传一个别的地址进来。
 pub async fn download_models(
     ext: &Path,
     url: &str,
@@ -1605,22 +1672,18 @@ pub async fn download_models(
     })
 }
 
-/// 下载运行时 zip 并解压到 `<扩展包根>/svsep/`（`runtime/` 那一层留着）。
+/// 下载运行时的**全部分卷**，解压到 `<扩展包根>/svsep/`（`runtime/` 那一层留着）。
 ///
-/// ⚠️ 这个包**几 GB**，只该下一次：文件多、解压慢。换工作站版本时运行时通常
-/// 不变 —— 变的是 `backend/` 那几个 .py，而**那部分随程序打包**，不走这里。
+/// ⚠️ 这个包**几 GB、还是分卷的**，只该下一次：文件多、解压慢。换工作站版本时
+/// 运行时通常不变 —— 变的是 `backend/` 那几个 .py，而**那部分随程序打包**，不走这里。
+/// ⚠️ 链接不从这里传：分卷是一整批（见 `RUNTIME_PARTS`），要拿别的来源顶替整批
+/// 就设 `VSS_MODULES_BASE`（见 `release_base`）。
 pub async fn download_runtime(
     ext: &Path,
-    url: &str,
     ctl: &DownloadCtl,
     on_progress: impl Fn(u64, Option<u64>, Stage) + Send + Sync + 'static,
 ) -> Result<FetchOutcome, String> {
-    let given = if url.trim().is_empty() {
-        None
-    } else {
-        Some(url)
-    };
-    let b = Bundle::runtime(ext, given);
+    let b = Bundle::runtime(ext);
     Ok(match fetch_bundle(&b, ctl, &on_progress).await? {
         FetchOutcome::Done(mut v) => {
             if let Some(o) = v.as_object_mut() {
@@ -1882,13 +1945,152 @@ pub fn unpack(
     })
 }
 
+/// 把**一组分卷**当成一个包解开。分卷只有一项时就等于 [`unpack`]。
+///
+/// 分卷的「分卷解压」在这里就是**拼起来读**：`Volumes` 让 6 个文件看起来像 1 个
+/// （见那个类型的注释），`zip` crate 照旧只认一个 `Read + Seek`。
+pub fn unpack_volumes(
+    parts: &[PathBuf],
+    dest: &Path,
+    strip: &str,
+    on_progress: &(impl Fn(u64, Option<u64>, Stage) + Send + Sync),
+) -> Result<ExtractReport, String> {
+    on_progress(0, None, Stage::Extract);
+    extract_volumes(parts, dest, strip, |done, all| {
+        on_progress(done, Some(all), Stage::Extract)
+    })
+    .map_err(|e| {
+        /* ⚠️ 分卷最可能的一种坏法不是「少下了一卷」（那会在 `Volumes::open` 就说是缺哪一卷），
+           而是**发布点上那几卷不是「按字节切」的**：WinZip / Bandizip 的「跨卷 zip」是另一种
+           格式（中央目录里记的是「第几卷 + 卷内偏移」），首尾相接不是合法 zip。
+           用户为这个错已经等了几 GB 的下载，所以这里直接把话说到底。 */
+        if parts.len() > 1 {
+            format!(
+                "{e}；⚠️ 这几卷如果是用 WinZip / Bandizip 那种「跨卷 zip」分的，拼起来本来就不是 \
+                 合法 zip —— 要用 `tools/split_volumes.mjs` 按字节切。"
+            )
+        } else {
+            e
+        }
+    })
+}
+
+/// 把一组分卷当成**一个文件**来读（`Read + Seek`）。
+///
+/// 为什么要它：`zip` crate 要的是 `Read + Seek`，而分卷在盘上是 6 个文件。先拼成
+/// 一个 4.9 GB 的临时文件也能解，但那是白抄一遍几 GB（用户盘上还得同时放得下两份）。
+///
+/// ⚠️ **少任何一卷都打不开**（`open` 直接报缺的是哪一卷），不会出现「后面的字节
+/// 接到前面」—— 那种拼法解出来的是另一个包里的东西，而两万多个条目里没人看得出来。
+struct Volumes {
+    files: Vec<std::fs::File>,
+    /// 每一卷的起点（前缀和），与 `files` 一一对应
+    starts: Vec<u64>,
+    /// 每个句柄当前的读位置 —— 读之前对一次，省掉逐块的 `lseek`
+    at: Vec<u64>,
+    total: u64,
+    pos: u64,
+}
+
+impl Volumes {
+    fn open(parts: &[PathBuf]) -> Result<Self, String> {
+        let mut files = Vec::with_capacity(parts.len());
+        let mut starts = Vec::with_capacity(parts.len());
+        let mut at = Vec::with_capacity(parts.len());
+        let mut total = 0u64;
+        for p in parts {
+            let f = std::fs::File::open(p).map_err(|e| {
+                format!(
+                    "分卷「{}」打不开：{e}（分卷不齐就拼不出这个包）",
+                    p.display()
+                )
+            })?;
+            let len = f
+                .metadata()
+                .map_err(|e| format!("读「{}」的大小失败：{e}", p.display()))?
+                .len();
+            files.push(f);
+            starts.push(total);
+            at.push(0);
+            total += len;
+        }
+        if files.is_empty() {
+            return Err("一个分卷都没有".into());
+        }
+        Ok(Self {
+            files,
+            starts,
+            at,
+            total,
+            pos: 0,
+        })
+    }
+
+    /// 某个全局偏移落在第几卷、卷内偏移多少。
+    fn locate(&self, pos: u64) -> Option<(usize, u64)> {
+        if pos >= self.total {
+            return None;
+        }
+        let i = match self.starts.binary_search(&pos) {
+            Ok(i) => i,
+            Err(i) => i - 1, // pos 落在第 i-1 卷里（i==0 时 pos<starts[0] 不可能）
+        };
+        Some((i, pos - self.starts[i]))
+    }
+}
+
+impl std::io::Read for Volumes {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::{Seek, SeekFrom};
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let Some((i, off)) = self.locate(self.pos) else {
+            return Ok(0); // 到末尾了
+        };
+        // 一次只在一卷里读：读满或读到这一卷末尾都返回，上层（io::copy）会再调一次
+        let end = self.starts.get(i + 1).copied().unwrap_or(self.total);
+        let want = (end - self.pos).min(buf.len() as u64) as usize;
+        let f = &mut self.files[i];
+        if self.at[i] != off {
+            f.seek(SeekFrom::Start(off))?;
+            self.at[i] = off;
+        }
+        let n = f.read(&mut buf[..want])?;
+        self.at[i] += n as u64;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for Volumes {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        use std::io::SeekFrom;
+        let next: i128 = match from {
+            SeekFrom::Start(n) => n as i128,
+            SeekFrom::Current(d) => self.pos as i128 + d as i128,
+            SeekFrom::End(d) => self.total as i128 + d as i128,
+        };
+        if next < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek 到文件头之前",
+            ));
+        }
+        // 允许越过末尾：`zip` crate 自己要判断「偏移是不是落在文件里」
+        self.pos = next as u64;
+        Ok(self.pos)
+    }
+}
+
 /// 解一个 zip 到 `dest`，返回解出来多少。
 ///
 /// `strip` 是要从每个条目名前面剥掉的一层目录名（带斜杠），剥不掉就原样保留。
-/// 两个包的布局不同，必须显式说清楚：
-///   * `svsep-models.zip` 里是 `models/…`，解到 `<可写>/svsep/` 要剥掉 `models/`；
-///   * `svsep-runtime.zip` 里是 `runtime/…`，解到 `<root>/data/svsep/` 要**留着**
-///     （那边正好需要 `runtime/python.exe` 这一层）。
+/// 三个包的布局不同，必须显式说清楚：
+///   * `models.zip` 里是 `models/…`，解到 `<可写>/svsep/` 要剥掉 `models/`；
+///   * `runtime.z01…` 那一套里是 `runtime/…`，解到 `<可写>/svsep/` 要**留着**
+///     （那边正好需要 `runtime/python.exe` 这一层）；
+///   * `GAME-1.0.3-large-onnx.zip` 里套着同名的一层，剥掉它（见 `midi_transcribe`）。
 /// 解到哪一层写错不会报错，只会在用户点「开始分离」时才现形。
 ///
 /// ## 为什么用 `zip` crate 而不是自己写
@@ -1899,15 +2101,16 @@ pub fn unpack(
 /// * **规范细节都得重新对一遍**。EOCD 从文件尾往回找几 KB、Zip64 的两个哨兵、
 ///   「中央目录偏移是 0xFFFFFFFF 时占位符在哪儿」……这些规范里都写清楚了，
 ///   而 crate 实现的正是同一份规范，还带着官方测试矢量。
-/// * **不整块读进内存**。runtime.zip 里有单个条目接近 1 GB，先读整个压缩体再解
+/// * **不整块读进内存**。runtime 里有单个条目接近 1 GB，先读整个压缩体再解
 ///   等于为了解一个文件先申请 1 GB。crate 是流式的（`io::copy` 边解边写）。
-/// * **CRC 校验**。crate 默认逐条核对解出来的内容完整性。
+/// * **CRC 校验**。crate 默认逐条核对解出来的内容完整性 —— 走镜像下下来的字节
+///   是不是原文件，最终就是在这里露出来的。
 /// * **zip slip 是安全边界**。防目录穿越写错一次就是任意文件写入，
 ///   交给 `enclosed_name()`（它按 Windows 语义切 `..`，反斜杠也算分隔符）。
 ///
 /// ## `strip` 与 `enclosed_name` 的顺序
 ///
-/// ⚠️ **必须先 `strip` 再交给 `enclosed_name`**，不能反过来：两个包的布局都是
+/// ⚠️ **必须先 `strip` 再交给 `enclosed_name`**，不能反过来：几个包的布局都是
 /// 「顶层一个目录」，`strip` 正是用来剥掉它。顺序错了要么剥不掉、要么把
 /// `enclosed_name` 已经算好的相对路径又切一刀。这两步是分开的两件事：
 /// `strip` 管「解出来放哪一层」，`enclosed_name` 管「这个条目名安不安全」。
@@ -1917,11 +2120,35 @@ pub fn extract_zip(
     strip: &str,
     // `FnMut` 而不是 `Fn`：单测要往 Vec 里记进度，`Fn` 连这个都做不到
     // （真实调用点只是往全局静态里写，两者都满足）。
-    mut on_progress: impl FnMut(u64, u64),
+    on_progress: impl FnMut(u64, u64),
 ) -> Result<ExtractReport, String> {
     let f = std::fs::File::open(zip_path).map_err(|e| format!("打开 zip 失败：{e}"))?;
+    extract_from(f, dest, strip, on_progress)
+}
+
+/// 解一组分卷（把它当**一个** zip）。与 [`extract_zip`] 是同一条实现的两种入口。
+pub fn extract_volumes(
+    parts: &[PathBuf],
+    dest: &Path,
+    strip: &str,
+    on_progress: impl FnMut(u64, u64),
+) -> Result<ExtractReport, String> {
+    let v = Volumes::open(parts)?;
+    extract_from(v, dest, strip, on_progress)
+}
+
+/// 解压的真正实现：**一个 `Read + Seek` 进来，一棵目录树出去**。
+///
+/// 单文件与分卷都归它 —— 分卷那层差异已经被 [`Volumes`] 吃掉了，这里不该再分叉
+/// （分叉出来就是两份「zip slip 怎么防」「进度怎么算」）。
+fn extract_from<R: std::io::Read + std::io::Seek>(
+    reader: R,
+    dest: &Path,
+    strip: &str,
+    mut on_progress: impl FnMut(u64, u64),
+) -> Result<ExtractReport, String> {
     let mut zip =
-        zip::ZipArchive::new(f).map_err(|e| format!("不是有效的 zip（读不出中央目录）：{e}"))?;
+        zip::ZipArchive::new(reader).map_err(|e| format!("不是有效的 zip（读不出中央目录）：{e}"))?;
     let mut report = ExtractReport { files: 0, bytes: 0 };
     let mut done_src: u64 = 0;
 
@@ -2276,7 +2503,7 @@ mod tests {
     /// 可能有 Zip64、字段排布也可能不一样），两个包都不进仓库，
     /// 所以这条用环境变量守着，平时直接跳过。
     ///
-    ///     $env:VSS_REAL_ZIP='H:\工作站\资料归档\models.zip'; cargo test --bins reads_the_real -- --nocapture
+    ///     $env:VSS_REAL_ZIP='H:\工作站\资料归档\models.zip'; cargo test --lib reads_the_real -- --nocapture
     ///
     /// ⚠️ 这条验的是**我们对 `zip` crate 的用法**（zip64 换值、EOCD 扫描那些
     /// 归 crate）：`strip` 剥对没有、大条目解得出来没有、而且**解出来的字节数与
@@ -2340,7 +2567,7 @@ mod tests {
     ///
     ///     $env:VSS_REAL_MODELS_URL='http://127.0.0.1:18080/models.zip'
     ///     $env:VSS_REAL_DOWNLOAD_DEST='H:\工作站\tmp-svsep-dl'
-    ///     cargo test --bins downloads_the_real_models_pack -- --nocapture
+    ///     cargo test --lib downloads_the_real_models_pack -- --nocapture
     #[tokio::test]
     async fn downloads_the_real_models_pack_when_asked() {
         let Ok(url) = std::env::var("VSS_REAL_MODELS_URL") else {
@@ -2360,7 +2587,7 @@ mod tests {
         // 这次真跑不允许暂停/停止，只验「下完 → 解好 → 临时文件清掉」
         static NO_PAUSE: AtomicBool = AtomicBool::new(false);
         static NO_STOP: AtomicBool = AtomicBool::new(false);
-        let ctl = DownloadCtl::new(&NO_PAUSE, &NO_STOP, None);
+        let ctl = DownloadCtl::new(&NO_PAUSE, &NO_STOP, false);
         let out = download_models(&dest, &url, &ctl, move |got, _total, _stage| {
             let mut s = seen2.lock().unwrap();
             s.0 = got;
@@ -2404,7 +2631,7 @@ mod tests {
         );
 
         // 临时 zip 与 `.part` 都该没了 —— 它有几 GB，留着毫无用处
-        for leftover in ["svsep-models.zip", "svsep-models.zip.part"] {
+        for leftover in ["models.zip", "models.zip.part"] {
             assert!(
                 !models.join(leftover).exists(),
                 "临时文件没删掉：{leftover}"
@@ -2418,8 +2645,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
     }
 
-    /// 走一遍**真的暂停 → 续传**：下到一半立暂停旗标，看 `.part` 留着；再带着
-    /// `resume_url` 下第二次，看它真的从断点接上（不是从头下）。
+    /// 走一遍**真的暂停 → 续传**：下到一半立暂停旗标，看 `.part` 留着；再授权续传
+    /// （`ctl.resume = true`）下一次，看它真的从断点接上（不是从头下）。
     ///
     /// 为什么非要真打一次 HTTP：`Range` 的语义是**服务端**的事 —— 我们发
     /// `bytes=N-`，服务端可以回 206，也可以不理会回 200 一整份。两种情况下代码
@@ -2428,7 +2655,7 @@ mod tests {
     ///
     ///     $env:VSS_REAL_MODELS_URL='http://127.0.0.1:18080/models.zip'
     ///     $env:VSS_REAL_RESUME_DEST='H:\工作站\tmp-svsep-resume'
-    ///     cargo test --bins pause_and_resume -- --nocapture
+    ///     cargo test --lib pause_and_resume -- --nocapture
     #[tokio::test]
     async fn pauses_and_resumes_the_real_models_pack_when_asked() {
         let Ok(url) = std::env::var("VSS_REAL_MODELS_URL") else {
@@ -2440,12 +2667,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
         let models = models_dir(&dest);
         std::fs::create_dir_all(&models).unwrap();
-        let part = models.join("svsep-models.zip.part");
+        let part = models.join("models.zip.part");
 
         /* ── 第一轮：下到 12 MB 就暂停 ───────────────────── */
         static PAUSE: AtomicBool = AtomicBool::new(false);
         static STOP: AtomicBool = AtomicBool::new(false);
-        let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
         let marks = std::sync::Arc::new(Mutex::new(0u64));
         let marks2 = marks.clone();
         let out = download_models(&dest, &url, &ctl, move |got, _, _stage| {
@@ -2484,14 +2711,13 @@ mod tests {
             "还没下完就解压出模型了"
         );
 
-        /* ── 第二轮：带 resume_url 接着下 ────────────────── */
-        let ctl2 = DownloadCtl::new(&PAUSE, &STOP, Some(url.clone()));
+        /* ── 第二轮：授权续传，接着下 ────────────────── */
+        let ctl2 = DownloadCtl::new(&PAUSE, &STOP, true);
         assert!(
             ctl2.paused() == false && ctl2.cancelled() == false,
             "构造时该清旗标"
         );
-        let resumed_from = ctl2.resume_url.clone().unwrap();
-        assert_eq!(resumed_from, url);
+        let resumed_from = url.clone();
         let seen = std::sync::Arc::new(Mutex::new(Vec::<(u64, u64)>::new()));
         let seen2 = seen.clone();
         let t = Instant::now();
@@ -2532,7 +2758,7 @@ mod tests {
             assert!(models.join(name).is_file(), "续传后缺文件：{name}");
         }
         assert!(!part.exists(), "下完了 .part 还在");
-        assert!(!models.join("svsep-models.zip").exists(), "下完了 zip 还在");
+        assert!(!models.join("models.zip").exists(), "下完了 zip 还在");
         let st = models_status(&dest);
         assert_eq!(st["ok"], Value::Bool(true), "续传后状态复查说没齐");
 
@@ -2620,7 +2846,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
         static PAUSE: AtomicBool = AtomicBool::new(false);
         static STOP: AtomicBool = AtomicBool::new(false);
-        let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
         let ticks = std::sync::Arc::new(Mutex::new(Vec::<(u64, Option<u64>, Stage)>::new()));
         let ticks2 = ticks.clone();
 
@@ -2646,7 +2872,7 @@ mod tests {
         );
         assert_eq!(std::fs::read(models.join("b.ckpt")).unwrap().len(), 3000);
         // 下完就该收拾干净：`.part` 与记号都不留
-        let part = models.join("svsep-models.zip.part");
+        let part = models.join("models.zip.part");
         assert!(!part.exists(), "下完了 .part 还在");
         assert!(!url_marker(&part).exists(), "下完了 .part.url 还在");
 
@@ -2716,13 +2942,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
         std::fs::create_dir_all(models_dir(&dest)).unwrap();
         // 把一整包摆在 `.part` 上、记号也写好：就是「下完了、解压没跑完」那个现场
-        let part = models_dir(&dest).join("svsep-models.zip.part");
+        let part = models_dir(&dest).join("models.zip.part");
         std::fs::write(&part, &zip).unwrap();
         let _ = crate::download::write_url_marker(&part, &url);
 
         static PAUSE: AtomicBool = AtomicBool::new(false);
         static STOP: AtomicBool = AtomicBool::new(false);
-        let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
         let b = Bundle::models(&dest, Some(&url));
         let out = fetch_bundle(&b, &ctl, &|_, _, _| {})
             .await
@@ -2767,11 +2993,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 分卷：**把 N 个文件当成一个 zip 解**，而且少一卷就必须当场说缺哪一卷。
+    ///
+    /// 为什么非要单独钉一条：`Volumes` 里那个「全局偏移 → 第几卷第几字节」的换算是
+    /// 手写的，错一格的表现是「解出来的一堆文件全是坏的」，而两万多个条目里没人
+    /// 看得出来。这里拿一个**真 zip 切开**来验：切开再合起来解出的字节必须与原包一致。
+    #[test]
+    fn volumes_are_read_as_one_file_and_a_missing_one_is_refused() {
+        let inner = "BS-Roformer-SW".repeat(400);
+        let zip = make_zip(&[
+            ("runtime/python.exe", inner.as_bytes(), true),
+            ("runtime/Lib/a.dll", &[7u8; 5000], false),
+            ("runtime/Lib/b.dll", &[9u8; 123], false),
+        ]);
+        let dir = std::env::temp_dir().join("vss-svsep-volumes");
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let whole = src.join("runtime.zip");
+        std::fs::write(&whole, &zip).unwrap();
+
+        /* 切成 7 字节一卷 —— 比条目头还小，正好把「跨卷读」那条路踩满
+           （真包是 966 MB 一卷，那条路上除了边界别的都一样）。 */
+        let vol_dir = dir.join("vols");
+        std::fs::create_dir_all(&vol_dir).unwrap();
+        let mut parts = Vec::new();
+        for (i, chunk) in zip.chunks(7).enumerate() {
+            let p = vol_dir.join(format!("runtime.{i:02}.part"));
+            std::fs::write(&p, chunk).unwrap();
+            parts.push(p);
+        }
+        assert!(parts.len() > 3, "样本太小，切不出几卷");
+
+        // ① 少一卷：当场说清缺的是哪一卷，而不是解出一堆坏文件
+        let missing = parts[1].clone();
+        std::fs::remove_file(&missing).unwrap();
+        let err = extract_volumes(&parts, &dir.join("out"), "", |_, _| {})
+            .expect_err("少一卷必须报错");
+        assert!(
+            err.contains(&missing.file_name().unwrap().to_string_lossy().to_string()),
+            "错误里要说清缺的是哪一卷：{err}"
+        );
+        std::fs::write(&missing, zip.chunks(7).nth(1).unwrap()).unwrap();
+
+        // ② 卷齐了：解出来的东西要和整包一模一样
+        let (from_vols, from_whole) = (dir.join("out-vols"), dir.join("out-whole"));
+        let rv = extract_volumes(&parts, &from_vols, "runtime/", |_, _| {}).expect("分卷解不开");
+        let rw = extract_zip(&whole, &from_whole, "runtime/", |_, _| {}).expect("整包解不开");
+        assert_eq!((rv.files, rv.bytes), (rw.files, rw.bytes), "分卷与整包解出的量不一致");
+        assert_eq!(
+            std::fs::read(from_vols.join("python.exe")).unwrap(),
+            inner.as_bytes(),
+            "跨卷拼出来的第一个条目就不对 —— 卷内偏移算错了"
+        );
+        assert_eq!(std::fs::read(from_vols.join("Lib/b.dll")).unwrap().len(), 123);
+        assert_eq!(
+            std::fs::read(from_vols.join("Lib/a.dll")).unwrap(),
+            std::fs::read(from_whole.join("Lib/a.dll")).unwrap(),
+            "跨卷读与整包读的结果必须逐字节相同"
+        );
+
+        // ③ 「拼起来是一整包」的判据：齐了算、缺一卷不算（少一卷就白等解压才炸）
+        assert!(pack_is_whole_zip(&parts), "卷齐了没认出来");
+        let gone = parts.pop().unwrap();
+        assert!(!pack_is_whole_zip(&parts), "少一卷还被当成一整包");
+        std::fs::write(&gone, zip.chunks(7).last().unwrap()).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 5 轮都不成才报错，而且**半个包留着** —— 界面上还能点「继续下载」接着下。
     ///
     /// ⚠️ 这条要跑满 5 × 10 秒（真的等），所以标 `#[ignore]`：它验的是「放弃之后
     /// 的收场」，不是每次改下载代码都要过一遍的东西。跑法：
-    ///     cargo test --bins -- --ignored gives_up_after_five_rounds --nocapture
+    ///     cargo test --lib -- --ignored gives_up_after_five_rounds --nocapture
     #[tokio::test]
     #[ignore = "要真等 50 秒（5 轮 × 10 秒），按需手动跑"]
     async fn gives_up_after_five_rounds_and_keeps_the_half_pack() {
@@ -2801,7 +3096,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
         static PAUSE: AtomicBool = AtomicBool::new(false);
         static STOP: AtomicBool = AtomicBool::new(false);
-        let ctl = DownloadCtl::new(&PAUSE, &STOP, None);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
         let b = Bundle::models(&dest, Some(&url));
 
         let t = Instant::now();
@@ -2814,15 +3109,111 @@ mod tests {
             "5 轮 × 10 秒没等够就放弃了：{took:?}"
         );
         // 半个包留着：界面上「继续下载」还有得续
-        let part = Bundle::models(&dest, None)
-            .dest
-            .join("svsep-models.zip.part");
+        let part = Bundle::models(&dest, None).dest.join("models.zip.part");
         assert!(file_size(&part) > 0, "放弃之后半个包也没了，下次只能从头下");
         assert_eq!(
-            resume_point(&dest, "models", &url),
+            resume_point(&dest, "models"),
             Some(file_size(&part)),
             "留下的半个包认不出来（`resume_point` 拿不到断点）"
         );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 把**真的分卷**验一遍：六卷拼起来要能被当成一个 zip 读出来，而且里面那些
+    /// 路径正是 `artifact` 表要的。
+    ///
+    /// 为什么值得单独一条：真包的中央目录是 **Zip64**、而且落在**最后一卷**里
+    /// （`.z01…z05` 全是 0.9 GiB 的满卷，EOCD / Zip64 EOCD 都在那个 111 MB 的小卷里）。
+    /// 单测那个「7 字节一卷」的小样本证明不了这件事，而它正是 `Volumes` 最容易错的
+    /// 地方 —— 错了的表现是「几个 GB 下完才说不是有效 zip」。
+    ///
+    ///     $env:VSS_REAL_RUNTIME_VOLS='C:\Users\qingm\Downloads\runtime'
+    ///     cargo test --lib real_split_runtime -- --nocapture
+    #[test]
+    fn reads_the_real_split_runtime_when_asked() {
+        let Ok(dir) = std::env::var("VSS_REAL_RUNTIME_VOLS") else {
+            return;
+        };
+        let parts: Vec<PathBuf> = RUNTIME_PARTS
+            .iter()
+            .map(|p| Path::new(&dir).join(p.name))
+            .collect();
+        assert!(
+            pack_is_whole_zip(&parts),
+            "六卷拼起来读不出中央目录（表里的名字/顺序和盘上的对不上？）"
+        );
+        let mut z = zip::ZipArchive::new(Volumes::open(&parts).unwrap()).unwrap();
+        println!("真分卷：{} 个条目 / 合计 {RUNTIME_ZIP_BYTES} 字节", z.len());
+        for want in ["runtime/python.exe", "backend/app.py", "bin/ffmpeg.exe"] {
+            assert!(
+                z.by_name(want).is_ok(),
+                "分卷里没有 {want} —— 落点与 `artifact` 表对不上，装完也起不来"
+            );
+        }
+    }
+
+    /// 走一遍**真的分卷下载**：从发布点（经 `ghmirror` 挑的那面镜像）把六卷全下来、
+    /// 拼起来解到临时目录，最后用 `runtime_ready` 判「装好了」。
+    ///
+    /// 为什么值得单独跑：`reads_the_real_split_runtime_when_asked` 验的是**盘上的**分卷
+    /// 读得对；这条验的是整条链路 —— 挑镜像、六次带续传的下载、4.9 GB 拼装、
+    /// 2.7 万个文件的解压。这几步各自被单测覆盖，但「合起来能不能装出一个能跑的
+    /// 运行时」只有真跑一遍才知道。
+    ///
+    ///     $env:VSS_REAL_RUNTIME_DL='H:\工作站\tmp-runtime-dl'
+    ///     cargo test --lib downloads_the_real_runtime -- --nocapture
+    ///
+    /// ⚠️ 落点要指向一个**空的大目录**：下载 4.9 GB + 解开 7.5 GB，峰值约 12 GB。
+    /// ⚠️ 它走的是**发布版那几条真链接**（`RELEASE_DIR`），不是本地文件。
+    #[tokio::test]
+    async fn downloads_the_real_runtime_volumes_when_asked() {
+        let Ok(dest) = std::env::var("VSS_REAL_RUNTIME_DL") else {
+            return;
+        };
+        let dest = PathBuf::from(dest);
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        let seen = std::sync::Arc::new(Mutex::new((0u64, 0u64, 0usize, 0usize)));
+        let seen2 = seen.clone();
+        let t = Instant::now();
+        let out = download_runtime(&dest, &ctl, move |got, total, stage| {
+            let mut s = seen2.lock().unwrap();
+            s.0 = got.max(s.0);
+            s.1 = total.unwrap_or(0).max(s.1);
+            if stage == Stage::Extract {
+                s.3 += 1;
+            } else {
+                s.2 += 1;
+            }
+        })
+        .await
+        .expect("真分卷下载失败");
+        let (got, total, dl_ticks, ex_ticks) = *seen.lock().unwrap();
+        println!(
+            "下到 {got} / 报了 {total} 字节（下载回调 {dl_ticks} 次、解压回调 {ex_ticks} 次），\
+             总耗时 {:?}",
+            t.elapsed()
+        );
+        assert!(matches!(out, FetchOutcome::Done(_)), "收场不是 Done：{out:?}");
+        assert!(total == RUNTIME_ZIP_BYTES, "进度分母该是六卷之和 {RUNTIME_ZIP_BYTES}，实际 {total}");
+        assert!(dl_ticks > 50, "下载回调只有 {dl_ticks} 次，像是没真下");
+        assert!(ex_ticks > 0, "一次解压回调都没有 —— 六卷没被当成一个 zip 解");
+
+        assert!(runtime_ready(&dest), "下完解完却不算就绪");
+        for f in ["runtime/python.exe", "backend/app.py", "bin/ffmpeg.exe"] {
+            let p = runtime_base(&dest).join(f);
+            assert!(p.is_file(), "装完缺 {f}（落点 {}）", p.display());
+        }
+        // 六卷与它们的记号都该收拾干净了
+        for (_, p) in Bundle::runtime(&dest).files() {
+            assert!(!p.exists(), "下完还留着分卷：{}", p.display());
+            assert!(!url_marker(&p).exists(), "下完还留着记号：{}", p.display());
+        }
 
         let _ = std::fs::remove_dir_all(&dest);
     }
@@ -2831,7 +3222,7 @@ mod tests {
     /// 单测造的 zip 太小，证明不了大包；而 runtime 的解压目标是程序目录，
     /// 从界面上试会覆盖正在用的运行时，所以这里用环境变量把目标指到临时目录。
     ///
-    ///     $env:VSS_REAL_RUNTIME_ZIP='H:\工作站\资料归档\runtime.zip'; cargo test --bins real_runtime -- --nocapture
+    ///     $env:VSS_REAL_RUNTIME_ZIP='H:\工作站\资料归档\runtime.zip'; cargo test --lib real_runtime -- --nocapture
     #[test]
     fn extracts_the_whole_real_runtime_pack_when_asked() {
         let Ok(zip) = std::env::var("VSS_REAL_RUNTIME_ZIP") else {
@@ -2928,13 +3319,12 @@ mod tests {
         static P: AtomicBool = AtomicBool::new(false);
         static C: AtomicBool = AtomicBool::new(false);
 
-        let ctl = DownloadCtl::new(&P, &C, Some("  https://a/b.zip  ".into()));
+        let ctl = DownloadCtl::new(&P, &C, true);
         // 构造时把两个旗标都清了 —— 上一轮下载留下的 true 不能让这一轮立刻收手
         assert!(!ctl.check());
         assert!(!ctl.paused());
         assert!(!ctl.cancelled());
-        // 链接两边的空格要去掉，否则 Range 请求头里会带上一段空白
-        assert_eq!(ctl.resume_url.as_deref(), Some("https://a/b.zip"));
+        assert!(ctl.resume, "调用方授权了就该如实带着");
 
         P.store(true, Ordering::Relaxed);
         assert!(ctl.check() && ctl.paused() && !ctl.cancelled());
@@ -2943,10 +3333,8 @@ mod tests {
         C.store(true, Ordering::Relaxed);
         assert!(ctl.check() && !ctl.paused() && ctl.cancelled());
 
-        // 空链接 = 不许续传（调用方没传链接），不能变成一个空串 Range
-        let ctl2 = DownloadCtl::new(&P, &C, Some("".into()));
-        assert_eq!(ctl2.resume_url.as_deref(), Some(""));
-        assert_eq!(DownloadCtl::new(&P, &C, None).resume_url, None);
+        // 不许续传就是不许：`fetch_bundle` 据此把旧的半个包全删掉
+        assert!(!DownloadCtl::new(&P, &C, false).resume);
     }
 
     #[test]
@@ -2971,9 +3359,13 @@ mod tests {
 
         std::fs::write(models.join("BS-Roformer-SW.ckpt"), vec![7u8; 4096]).unwrap();
         std::fs::write(models.join("sub").join("x.yaml"), b"y").unwrap();
-        // 没下完的半个 zip：模型的落在 models/ 里，运行时的落在 svsep/ 那一层
-        std::fs::write(models.join("svsep-models.zip.part"), vec![0u8; 2048]).unwrap();
-        std::fs::write(svsep.join("svsep-runtime.zip.part"), vec![0u8; 8192]).unwrap();
+        /* 没下完的半个包：模型的落在 models/ 里，运行时的**每一卷**都落在 svsep/
+        那一层（6 卷，名字各不同）。⚠️ 这里必须摆两卷以上：清扫是按 `.part` 后缀认的，
+        只摆一卷时「名字带序号的那几卷会不会漏掉」根本验不出来。 */
+        std::fs::write(models.join("models.zip.part"), vec![0u8; 2048]).unwrap();
+        std::fs::write(svsep.join("runtime.z01.part"), vec![0u8; 8192]).unwrap();
+        std::fs::write(svsep.join("runtime.z02.part"), vec![0u8; 4096]).unwrap();
+        std::fs::write(svsep.join("runtime.z02.part.url"), b"https://x/y").unwrap();
         std::fs::write(svsep.join("runtime").join("python.exe"), vec![0u8; 1024]).unwrap();
         std::fs::write(
             svsep.join("runtime").join("Lib").join("a.dll"),
@@ -2990,15 +3382,17 @@ mod tests {
 
         let files = v.get("removedFiles").and_then(|x| x.as_u64()).unwrap();
         let bytes = v.get("removedBytes").and_then(|x| x.as_u64()).unwrap();
-        // 7 个文件 = 模型 2 + models 里的半个 zip 1 + runtime 2 + bin 1 + svsep 里的
-        // 半个 zip 1。摆进 base 的文件一共就这 7 个，删完正好一个不剩 —— 所以这个
-        // 数同时也是「有没有漏删」的判据；多一个就说明 walk 把同一个文件数了两遍。
+        // 9 个文件 = 模型 2 + models 里的半个 zip 1 + runtime 2 + bin 1 + svsep 那一层的
+        // 3 个（两卷 .part + 一个 .part.url）。摆进 base 的文件一共就这 9 个，删完正好
+        // 一个不剩 —— 所以这个数同时也是「有没有漏删」的判据；多一个就说明 walk 把
+        // 同一个文件数了两遍。
         assert_eq!(
-            files, 7,
-            "模型 2 + models 里的 .part 1 + runtime 2 + bin 1 + svsep 里的 .part 1，实际：{v}"
+            files, 9,
+            "模型 2 + models 里的 .part 1 + runtime 2 + bin 1 + svsep 那一层 3，实际：{v}"
         );
-        assert_eq!(bytes, 4096 + 1 + 2048 + 1024 + 512 + 64 + 8192);
-        assert_eq!(last, (7, bytes), "最后一次进度回调要是最终值");
+        let half_packs = 2048 + 8192 + 4096 + "https://x/y".len() as u64;
+        assert_eq!(bytes, 4096 + 1 + 1024 + 512 + 64 + half_packs);
+        assert_eq!(last, (9, bytes), "最后一次进度回调要是最终值");
         assert_eq!(v.get("lockedCount").and_then(|x| x.as_u64()), Some(0));
 
         // 目录本身留着（`models/` 是引擎的 MODEL_DIR，删了它会以为没装）
@@ -3008,10 +3402,12 @@ mod tests {
         assert!(svsep.join("app.py").is_file(), "backend 的 .py 不该被删");
         assert!(svsep.join("config.py").is_file());
         assert!(svsep.join("outputs").is_dir(), "用户的输出目录不该被删");
-        assert!(
-            !svsep.join("svsep-runtime.zip.part").exists(),
-            "运行时那半个 zip 要清掉"
-        );
+        for vol in ["runtime.z01.part", "runtime.z02.part", "runtime.z02.part.url"] {
+            assert!(
+                !svsep.join(vol).exists(),
+                "运行时那半个包（{vol}）要清掉 —— 漏一卷就是几个 GB 留在盘上"
+            );
+        }
 
         // 再删一次：目录都空了，不能再报出个数来（否则按钮会一直说「已删 5 个」）
         let v2 = delete_dependencies(&writable, || false, |_, _| {});
@@ -3035,52 +3431,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let writable = base.join("writable");
         std::fs::create_dir_all(writable.join("svsep").join("models")).unwrap();
-        let url = "https://example.test/svsep-models.zip";
+        let url = release_url(MODEL_PARTS[0].name);
 
         // ① 什么都没有：不能续
-        assert_eq!(resume_point(&writable, "models", url), None);
+        assert_eq!(resume_point(&writable, "models"), None);
         // 未知的种类（拼错 kind 不该 panic，也不该乱指一个目录）
-        assert_eq!(part_path(&writable, "nope"), None);
+        assert!(bundle_of(&writable, "nope").is_none());
 
-        // ② 只有半个包、没有记号：不认。`.part` 只有字节没有出处，拿它接一个
-        //    别的链接的 Range 会拼出坏 zip（要到解压才炸）。
-        let part = part_path(&writable, "models").unwrap();
+        // ② 只有半个包、没有记号：算能续。记号只是个几十字节的附属品，为了它丢掉
+        //    几个 GB 是坏交易（判据见 `stored_resume`）。
+        let parts: Vec<PathBuf> = Bundle::models(&writable, None)
+            .files()
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
         assert_eq!(
-            part,
-            writable
-                .join("svsep")
-                .join("models")
-                .join("svsep-models.zip.part"),
+            parts,
+            vec![writable.join("svsep").join("models").join("models.zip.part")],
             "落点要跟着 Bundle 走，不能自己拼"
         );
+        let part = parts[0].clone();
         std::fs::write(&part, vec![0u8; 1234]).unwrap();
         assert_eq!(
-            resume_point(&writable, "models", url),
+            resume_point(&writable, "models"),
             Some(1234),
-            "记号缺失（老版本留的半个包）算能续：为了几十字节的记号丢掉几个 GB 是坏交易"
+            "记号缺失（老版本留的半个包）算能续"
         );
         // 补上记号之后还是同一个答案
-        crate::download::write_url_marker(&part, url).unwrap();
-        assert_eq!(resume_point(&writable, "models", url), Some(1234));
+        crate::download::write_url_marker(&part, &url).unwrap();
+        assert_eq!(resume_point(&writable, "models"), Some(1234));
 
         // ③ 记号写着**别的**链接：不认 —— 这才是那个记号存在的理由
-        crate::download::write_url_marker(&part, "https://other.test/svsep-models.zip").unwrap();
-        assert_eq!(resume_point(&writable, "models", url), None);
+        crate::download::write_url_marker(&part, "https://other.test/models.zip").unwrap();
+        assert_eq!(resume_point(&writable, "models"), None);
 
-        // ④ 记号是空文件（写到一半被杀）：也当「对不上」，宁可从零下
-        std::fs::write(url_marker(&part), b"").unwrap();
-        assert_eq!(resume_point(&writable, "models", url), None);
-
-        // ⑤ 收场后清记号：半个包不再算数
-        crate::download::write_url_marker(&part, url).unwrap();
+        // ④ 收场后清记号：半个包不再算数
+        crate::download::write_url_marker(&part, &url).unwrap();
         clear_resume_marker(&writable, "models");
         assert!(!url_marker(&part).exists());
-        assert_eq!(resume_point(&writable, "models", url), Some(1234));
+        assert_eq!(resume_point(&writable, "models"), Some(1234));
 
-        // ⑥ 空文件不算数：续到 0 字节等于没续，还得白跑一次 Range 请求
+        // ⑤ 空文件不算数：续到 0 字节等于没续，还得白跑一次 Range 请求
         std::fs::write(&part, b"").unwrap();
-        assert_eq!(resume_point(&writable, "models", url), None);
+        assert_eq!(resume_point(&writable, "models"), None);
+
+        /* ⑥ 分卷：报的是**认下来的那几卷之和**，而不是「有 .part 就算」。
+        一卷的记号对不上只该少那一卷 —— 它接上去会拼出别的包，其余的半个包还是
+        有效的（4.9 GB 里保住 4.8 GB 与从零开始是两回事）。 */
+        let vols: Vec<PathBuf> = Bundle::runtime(&writable)
+            .files()
+            .into_iter()
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(vols.len(), RUNTIME_PARTS.len(), "卷数该跟着表走");
+        let urls: Vec<String> = Bundle::runtime(&writable)
+            .files()
+            .into_iter()
+            .map(|(u, _)| u)
+            .collect();
+        assert!(
+            urls[0].ends_with("runtime.z01") && urls[urls.len() - 1].ends_with("runtime.zip"),
+            "第一卷一整卷在最后，顺序不能变：{urls:?}"
+        );
+        std::fs::write(&vols[0], vec![0u8; 500]).unwrap();
+        std::fs::write(&vols[1], vec![0u8; 300]).unwrap();
+        crate::download::write_url_marker(&vols[0], &urls[0]).unwrap();
+        crate::download::write_url_marker(&vols[1], &urls[1]).unwrap();
+        assert_eq!(resume_point(&writable, "runtime"), Some(800));
+        crate::download::write_url_marker(&vols[1], "https://other.test/runtime.z02").unwrap();
+        assert_eq!(
+            resume_point(&writable, "runtime"),
+            Some(500),
+            "记号写着别的链接的那一卷不算数"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 分卷表与那个「总大小」常量必须对得上 —— 它们是同一件事的两处写法
+    /// （进度分母取表，界面说「要下 4.7 GB」取常量），漂了没人会当场发现。
+    #[test]
+    fn the_runtime_parts_add_up_to_the_published_size() {
+        let sum: u64 = RUNTIME_PARTS.iter().map(|p| p.bytes).sum();
+        assert_eq!(
+            sum, RUNTIME_ZIP_BYTES,
+            "分卷表加起来是 {sum}，而 RUNTIME_ZIP_BYTES 写的是 {RUNTIME_ZIP_BYTES}"
+        );
+        assert_eq!(
+            MODEL_PARTS[0].bytes, MODEL_ZIP_BYTES,
+            "模型那一项要与 MODEL_ZIP_BYTES 一致"
+        );
+        // 名字不重复：重名会让两卷共用一个 `.part`，第二卷覆盖第一卷一整卷
+        let mut names: Vec<&str> = RUNTIME_PARTS.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "分卷名重复了：{names:?}");
     }
 }

@@ -2,11 +2,14 @@
 /**
  * 打包 —— 把 `tools/assets.mjs` 表里那些「我们自己打包」的东西打成 zip。
  *
- *     node tools/pack_assets.mjs                     # 全部（现在只有 CDN 大件）
- *     node tools/pack_assets.mjs --only cdn          # game.models, svsep.*
+ *     node tools/pack_assets.mjs                     # 全部（现在只有发布点大件）
+ *     node tools/pack_assets.mjs --only release      # game.models, svsep.*
  *     node tools/pack_assets.mjs --only svsep.models # 也可以直接点 id
  *     node tools/pack_assets.mjs --bench             # 只测压缩档位速度
  *     node tools/pack_assets.mjs --out /tmp/zipprobe --force
+ *
+ * ⚠️ **只打包、不上传，也不分卷**：runtime 那 6 卷由 `tools/split_volumes.mjs`
+ * 从这个脚本产出的 `runtime.zip` **按字节切**出来（见那个脚本的头注释：跨卷 zip 不行）。
  *
  * ── 为什么打包只有这一个脚本 ────────────────────────────────────────
  *
@@ -191,8 +194,8 @@ export async function main(argv = process.argv.slice(2)) {
   let todo
   if (want.length === 1 && want[0] === 'all') {
     todo = assets.packable()
-  } else if (want.length === 1 && want[0] === 'cdn') {
-    todo = assets.packable().filter((x) => x.host === assets.HOST_CDN)
+  } else if (want.length === 1 && want[0] === 'release') {
+    todo = assets.packable().filter((x) => x.host === assets.HOST_RELEASE)
   } else {
     const known = new Set(assets.ARTIFACTS.map((x) => x.id))
     const unknown = want.filter((x) => !known.has(x))

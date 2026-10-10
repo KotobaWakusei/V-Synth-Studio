@@ -189,7 +189,7 @@ pub async fn midi_models_download(st: super::St<'_>) -> Cmd {
 
     // `DownloadCtl` 收的是 `&'static AtomicBool`，而这两个旗标正是 `'static` ——
     // 直接借，不用 clone（clone 出来的是个临时值，借不成 'static）。
-    let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, None);
+    let ctl = crate::svsep::DownloadCtl::new(&DL_PAUSE, &DL_STOP, false);
     spawn_download("models", async move {
         let v = mt::download_models(&writable, &ctl, note_progress).await?;
         crate::log_line(&format!("人声转 MIDI：模型下载完成 {:?}", v.get("dir")));

@@ -67,13 +67,17 @@
 ⚠️ **「非商业」是硬约束**：带这个功能分发/使用时不能用于商业用途。界面「许可与出处」
 那一栏就是为这条规矩放的，**别删**。这也和资源库的收录原则（`AGENTS.md` 第六节）同源。
 
-⚠️ **权重包是「自己托管」，不是「自己产的」**：下载地址是用户 123 云盘 CDN 上的
-**同一份官方 ONNX 导出**（`tools\game-pack.ps1` 从 `app\data\game\models\` 打出来，
-白名单四个文件、逐个校验实测字节数；顶层目录名沿用上游的 `GAME-1.0.3-large-onnx/`，
-所以两个包可以互换）。换托管的**唯一**原因是 GitHub 的 release 资产在国内线路上下不动
-（实测 302 跳到 `objects.githubusercontent.com` 之后 TLS 握手直接失败）—— **不是**换了个模型。
-许可与出处仍然照上面那一行写：署名给 openvpi/GAME，许可 CC BY-NC-SA 4.0。
+⚠️ **权重包是「自己托管」，不是「自己产的」**：下载地址是本仓 release `modules` 标签上的
+**同一份官方 ONNX 导出**（`tools/pack_assets.mjs --only game.models` 从 `data/game/models/`
+打出来，白名单四个文件、逐个校验实测字节数；顶层目录名沿用上游的 `GAME-1.0.3-large-onnx/`，
+所以两个包可以互换）。许可与出处仍然照上面那一行写：署名给 openvpi/GAME，许可 CC BY-NC-SA 4.0。
 ⇒ **打这个包的人要把这条规矩当回事**：包里的东西一字未改，别往里塞自己训的或来路不明的权重。
+
+⚠️ **托管在 GitHub release，境内那条线路靠镜像**：release 资产会 302 到
+`objects.githubusercontent.com`，国内直连常不通。所以程序在下载前会按
+<https://git.hiwiki.org/zh-CN/mirrors> 的名单在**本机**实测几面镜像、挑最快的那面取字节
+（实现见 `src-tauri/src/ghmirror.rs`）。⚠️ 这一层**只改「从哪台服务器取字节」，不改包的内容**：
+镜像回来的字节同样要过大小核对与解压时的逐条 CRC。想强制走直连就设 `VSS_GH_MIRROR=off`。
 
 **ONNX Runtime**：本功能用 `ort` crate（MIT）以 `load-dynamic` 方式**在运行时加载**
 `onnxruntime.dll`，不静态链接、不随包分发这个 dll。两个来源：
@@ -82,9 +86,8 @@
    （`app/data/svsep/runtime/Lib/site-packages/onnxruntime/capi/onnxruntime.dll`，ORT 1.23.2，MIT）；
 2. 找不到时，用户可在扒谱页点「下载运行库」，从 Microsoft 官方 release 取
    `onnxruntime-win-x64-1.23.2.zip`（MIT）。
-   ⚠️ 这一条**没有**改托管 —— 它只在「没装音轨分离、又想要这个功能」时才走到，
-   而实测 `github.com` 与 `api.github.com` 是通的，下不动的是 `/releases/download/` 那条重定向。
-   哪天要把它也挪到 CDN，记得同批更新 `midi_transcribe.rs` 的 `RUNTIME_URL` 与 `RUNTIME_ZIP_BYTES`。
+   ⚠️ 这一条**没有**改托管 —— 它取的是微软自己 release 上那份；而「release 资产境内下不动」
+   这件事已由镜像层统一解决（走 `github.com/...` 的下载都会自动挑镜像，见上一条）。
 
 ---
 

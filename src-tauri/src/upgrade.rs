@@ -2,12 +2,13 @@
 //!
 //! ## 清什么、为什么
 //!
-//! 新版本换了落点之后，老落点里的半成品不会再被任何人认领，而它们正好是几 GB：
+//! 新版本换了落点或换了发布点之后，老落点里的半成品不会再被任何人认领，而它们正好是几 GB：
 //!
 //! ```text
-//! <老目录>/svsep/svsep-runtime.zip.part   下了一半的运行时（可能 4 GB）
-//! <老目录>/svsep/svsep-models.zip.part    下了一半的模型
-//! <老目录>/svsep/svsep-dml.whl            DirectML 加速包，解完就没用了，早期版本会留下
+//! <扩展包根>/svsep/models.zip.part      下了一半的模型
+//! <扩展包根>/svsep/runtime.z01.part     下了一半的运行时（6 卷，可能几 GB）
+//! <扩展包根>/svsep/svsep-runtime.zip.part   更早的版本留下的（名字不一样，本版本不认）
+//! <扩展包根>/svsep/svsep-dml.whl            DirectML 加速包，解完就没用了，早期版本会留下
 //! ```
 //!
 //! 更糟的是 `.part` **旁边那个记号还在**：用户下次点「继续安装」时，新版本会去认这个
@@ -41,8 +42,12 @@ impl Report {
 /// 这些后缀的文件是**我们自己的**临时产物，任何版本都不该长期留着。
 const TEMP_SUFFIXES: &[&str] = &[".part", ".part.url", ".whl"];
 
-/// 名字里带这些片段的**顶层文件**算是我们的残留（`.part` 之外的几种）。
-const TEMP_MARKERS: &[&str] = &["svsep-runtime.zip", "svsep-models.zip", "game-models.part"];
+/// 名字里带这些片段的**顶层文件**算是我们的残留。
+///
+/// ⚠️ 后缀那一条（`.part` / `.part.url`）已经收得住现役的几个名字
+/// （`models.zip.part`、`runtime.z01.part`…）；这里列的是**不带 `.part` 后缀**的几种，
+/// 以及更早的版本留下的那几个名字 —— 它们不删就是几 GB 死重量。
+const TEMP_MARKERS: &[&str] = &["svsep-runtime.zip", "svsep-models.zip", "game-models"];
 
 /// 扫一个目录（不递归）里的临时文件并删掉。
 ///

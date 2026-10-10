@@ -20,9 +20,8 @@
 //! # 模型与许可
 //!
 //! 代码 MIT，**权重 CC BY-NC-SA 4.0（非商业）**。所以模型不进仓库、不随包
-//! 分发，由用户在界面上点一下下载（`MODEL_URL`，我们自己托管在 123 云盘 CDN 上，
-//! 内容与官方 release 那个 zip 逐字节相同）—— 和音轨分离「运行时进包、
-//! 模型按需下」是同一条规矩。
+//! 分发，由用户在界面上点一下下载（我们自己的 release，见 `GAME_ZIP`）——
+//! 和音轨分离「运行时进包、模型按需下」是同一条规矩。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,26 +31,22 @@ use serde_json::{Value, json};
 
 use crate::game::{algo, engine};
 
-/// ONNX 权重包（opset 20，由上游 `deployment/exporter.py` 导出）。
+/// ONNX 权重包在发布点上的资产名（opset 20，由上游 `deployment/exporter.py` 导出）。
 ///
 /// ⚠️ 上游 release 的 `GAME-1.0-large.zip` 里是 **PyTorch 的 `model.pt`**，不是
 /// ONNX —— 要用 ONNX 就得认准 `-onnx` 这几个包（v1.0.3 才发布的）。
 ///
-/// # 为什么下的是自己的包，而不是上游 release
+/// # 为什么下的是我们自己的包，而不是上游 release
 ///
-/// 内容一样（都是官方导出的那三个图），但**托管在国内**：GitHub 的 release 资产
-/// 会 302 跳到 `objects.githubusercontent.com`，那条线路在境内连不上
-/// （TLS 握手失败 / 443 超时），而音轨分离的运行时与模型本来就放在 123 云盘 CDN，
-/// 模型包跟着一起走。
+/// 内容一样（都是官方导出的那三个图，逐字节相同），但**放在我们那个 release 上**：
+/// 一来与音轨分离的运行时 / 模型同一个发布点，二来 GitHub 的 release 资产在境内
+/// 常连不上，而那条路由 `crate::ghmirror` 现场挑镜像（见那边）。
 ///
 /// **两个包可以互换**：自建包沿用上游那个顶层目录名 `GAME-1.0.3-large-onnx/`，
 /// 所以 `download_models` 里那个 `strip` 常量两边都命得中（见那里的注释）。
 /// 自建包由 `tools/pack_assets.mjs --only game.models` 产出，白名单四个文件、
 /// 每个都校验实测字节数（清单在 `tools/assets.mjs` 的 `game.models` 那条）。
-///
-/// ⚠️ 末尾那个 `#` 不要删：123 云盘直链的原始形状就是带尾巴的，去掉可能 404。
-pub const MODEL_URL: &str =
-    "https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio/GAME-1.0.3-large-onnx.zip#";
+const GAME_ZIP: &str = "GAME-1.0.3-large-onnx.zip";
 
 /// 整包大小，只用来显示与校验「下完没有」。实测值。
 ///
@@ -75,32 +70,17 @@ pub const MODEL_BYTES: u64 = 393_794_532;
 再在这儿导出第二份，两边都没人用、各报一次 dead_code。 */
 
 // ---------------------------------------------------------------------------
-// 下载地址（编译期常量 + 只给开发机的临时覆盖）
+// 下载地址
 // ---------------------------------------------------------------------------
 
-/// **只给开发机用的临时覆盖**（`VSS_MIDI_MODEL_URL`）。
+/// 这一次真的要用的模型包地址。
 ///
-/// 与 `svsep.rs` 同一套规矩、同一个理由：链接是编译期常量，而「下载到一半
-/// 按删除」「进度条卡在 99%」这类事**必须真下着才验得出来**。要是每次改常量
-/// 重编，测完还得记得改回来 —— 漏一次就把本地文件路径发出去。
-/// ⚠️ 发布版**不要设这个变量**，设了就是拿本地文件当下载源。
-#[cfg(debug_assertions)]
-fn url_override(key: &str, default: &'static str) -> String {
-    match std::env::var(key) {
-        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => default.to_string(),
-    }
-}
-#[cfg(not(debug_assertions))]
-fn url_override(_key: &str, default: &'static str) -> String {
-    default.to_string()
-}
-
-/// 这一次真的要用的模型包地址（常量，或开发机用环境变量顶掉的那个）。
-///
-/// 只在 debug 构建里读环境变量 —— 发布版永远走 `MODEL_URL`。
+/// 链接由发布点拼出来（`crate::svsep::release_url`），那个根目录开发机可以用
+/// `VSS_MODULES_BASE` 顶成本地目录（见 `crate::svsep::release_base`）——
+/// 「下到一半按删除」「进度条卡在 99%」这类事必须真下着才验得出来。
+/// ⚠️ 发布版不认那个变量，永远走 GitHub。
 fn model_url() -> String {
-    url_override("VSS_MIDI_MODEL_URL", MODEL_URL)
+    crate::svsep::release_url(GAME_ZIP)
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +528,7 @@ pub fn data_dir(writable: &Path) -> PathBuf {
 /// 被一份跑不了的顶掉。
 ///
 /// ⚠️ **只多一件事**：debug 构建认 `VSS_MIDI_DLL` 强行指定（表不认识环境变量），
-/// 与 `svsep.rs::url_override` 同一套规矩 —— 发布版不认。
+/// 与 `svsep.rs::release_base` 认 `VSS_MODULES_BASE` 同一套规矩 —— 发布版不认。
 pub fn runtime_dll(root: &Path, writable: &Path) -> Option<PathBuf> {
     #[cfg(debug_assertions)]
     if let Ok(p) = std::env::var("VSS_MIDI_DLL") {

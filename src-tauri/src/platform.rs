@@ -203,7 +203,7 @@ pub fn find_binary(name: &str, extra_dirs: &[PathBuf]) -> Option<PathBuf> {
 /* ══════════════════════════════════ 平台能力 ══════════════════════════════════ */
 
 /// 离线分离引擎的运行时包是 Windows 专属：`python.exe`（embeddable 发行版）
-/// 加 `onnxruntime-directml` 的 win_amd64 wheel，见 `svsep.rs` 的 `RUNTIME_URL`。
+/// 加 `onnxruntime-directml` 的 win_amd64 wheel，见 `svsep.rs` 的 `RUNTIME_PARTS`。
 const SVSEP_LOCAL_WHY: &str = "离线分离的运行时包是 Windows 专属（python.exe + DirectML）";
 
 /// 这个平台上「没有本地分离引擎」的原因；`None` = 有。

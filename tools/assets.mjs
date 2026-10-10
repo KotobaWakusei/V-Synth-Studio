@@ -41,7 +41,7 @@ export const ROOT = '<root>'            // 程序根目录（resources.json 所�
 export const WRITABLE = '<writable>'    // 用户可写目录（安装后程序目录是只读的）
 
 // ── 托管方式 ────────────────────────────────────────────────────────
-export const HOST_CDN = 'cdn'            // 123 云盘 CDN，用户点按钮时下
+export const HOST_RELEASE = 'release'    // 我们自己的 GitHub release，用户点按钮时下
 export const HOST_UPSTREAM = 'upstream'  // 上游官网，构建时补齐脚本下
 export const HOST_REPO = 'repo'          // 就在仓库里
 
@@ -77,7 +77,11 @@ export const UPSTREAM_JIZURA_URL =
 // `tools/` 与 `public/vendor/jizura/` 的上游是 GitHub 与 Google Fonts，境内直连常不通，
 // 而它们又是打包必需的（缺了不报错，只是功能悄悄少一块）。所以除上游之外还认一份
 // **我们自己打的归档**，布局与本仓库一致（`tools/pack_archives.mjs` 产出的就是它），
-// 放在已经托管 models / runtime 的那个 CDN 目录里。
+// 放在一个境内直连可用的网盘目录里。
+//
+// ⚠️ 这块**与用户点按钮下的那几个扩展包无关**：那些走的是 GitHub release
+// （`RELEASE_DIR`，见下面每条 `url`），境内那条路由 Rust 侧的 `ghmirror` 现挑镜像。
+// 这里只管**打包时**要补齐的两块随包产物。
 //
 // ⚠️ 归档是**退路、不是替代**：它由人手工上传，会随网盘状态失效；上游才是权威。
 // 完全不联网（用别人拷来的归档）用 `--local <目录>` 或 `VSS_ASSETS_LOCAL=<目录>`；
@@ -179,8 +183,8 @@ export const ARTIFACTS = [
       need('estimator.onnx', 152_478_761),
       need('config.json', 198),
     ],
-    host: HOST_CDN,
-    url: 'https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio/GAME-1.0.3-large-onnx.zip',
+    host: HOST_RELEASE,
+    url: 'https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules/GAME-1.0.3-large-onnx.zip',
     min_bytes: 300 * MB,
     note:
       '顶层目录名**必须**是 GAME-1.0.3-large-onnx/ —— 上游官方包的布局就是它，沿用之后\n' +
@@ -196,12 +200,12 @@ export const ARTIFACTS = [
     into: `${WRITABLE}/svsep/models`,
     strip: 'models/',
     need: [need('BS-Roformer-SW.ckpt'), need('UVR-MDX-NET-Inst_HQ_3.onnx')],
-    host: HOST_CDN,
-    url: 'https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio/models.zip',
+    host: HOST_RELEASE,
+    url: 'https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules/models.zip',
     min_bytes: 500 * MB,
     note:
-      '⚠️ 本地临时 zip 叫 svsep-models.zip（Rust `Bundle::zip_name`），但**上传名**是\n' +
-      'models.zip（URL 里是它）。两个名字不一样是有意的，别「统一」。',
+      '⚠️ 本地临时 zip 叫 models.zip（也就是 release 上那个资产名）。\n' +
+      '⚠️ 落点判据是逐条目剥 `models/`（Rust `Bundle::models` 的 strip），改打包布局要同步改。',
   },
   {
     id: 'svsep.runtime',
@@ -220,8 +224,14 @@ export const ARTIFACTS = [
       need('backend/app.py'),
       need('bin/ffmpeg.exe'),
     ],
-    host: HOST_CDN,
-    url: 'https://1856610041.cdn.123clouddisk.com/1856610041/V-Synth-Studio/runtime.zip',
+    host: HOST_RELEASE,
+    /* ⚠️ **分卷**：GitHub 单个 release 资产上限 2 GB，4.94 GB 只能拆。
+       拆法与顺序**由 `tools/split_volumes.mjs` 定死**（按字节切开：每卷 0.9 GiB，
+       最后一卷是尾巴），这份 `volumes` 就是那个脚本的输出名单 —— 与
+       `svsep.rs::RUNTIME_PARTS` 必须逐字一致，两边名字或卷数一变，用户那边下完
+       就拼不出 zip。⛔ 别用 WinZip / Bandizip 的「跨卷 zip」：那是另一种格式。 */
+    url: 'https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules/runtime.z01',
+    volumes: ['runtime.z01', 'runtime.z02', 'runtime.z03', 'runtime.z04', 'runtime.z05', 'runtime.zip'],
     min_bytes: 1000 * MB,
     exclude: ['__pycache__', '*.pyc', 'templates', 'static'],
     note:
@@ -322,6 +332,24 @@ export function selfCheck() {
     for (const nd of a.need) {
       if (nd.rel.startsWith('/') || nd.rel.split('/').includes('..')) {
         bad.push(`${a.id}: need 里有个可疑路径 ${JSON.stringify(nd.rel)}`)
+      }
+    }
+
+    /* 分卷：拆法要与 Rust `svsep.rs::RUNTIME_PARTS` 逐字一致，而那边读不到这张表
+       （跨语言，和 `build.rs::MUST_HAVE` 同一类重复）。这里只能查**表内**说得通：
+       至少两卷、名字不重复、最后一卷就是 `zip` 那个名字（WinZip 的老约定：
+       其余叫 .z01…，最后一卷用 .zip）。卷名或顺序错了，用户下完拼不出 zip，
+       而那时几个 GB 已经下完了。 */
+    if (a.volumes) {
+      if (a.volumes.length < 2) bad.push(`${a.id}: volumes 只有 ${a.volumes.length} 项，那不叫分卷`)
+      if (new Set(a.volumes).size !== a.volumes.length) {
+        bad.push(`${a.id}: volumes 里有重名 —— 两卷共用一个文件名，后下的会盖掉先下的`)
+      }
+      if (a.volumes.at(-1) !== a.zip) {
+        bad.push(`${a.id}: 最后一卷必须是 ${JSON.stringify(a.zip)}，写的是 ${JSON.stringify(a.volumes.at(-1))}`)
+      }
+      if (!a.volumes[0].includes('.z')) {
+        bad.push(`${a.id}: 第一卷该是 .z01 这种名字，写的是 ${JSON.stringify(a.volumes[0])}`)
       }
     }
   }
