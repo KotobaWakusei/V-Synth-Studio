@@ -10,6 +10,10 @@
 //! —— 要一小段数据回来用的走 `net::fetch_json` / `net::fetch_bytes` /
 //! `lyrics::get_bytes`，**分界线是「这段字节最终要落成一个文件」**。
 //!
+//! ⚠️ 它还负责一件事：**GitHub 链接的镜像加速**（`ghmirror`）。`req.url` 一律是
+//! **规范链接**，真正取字节的地址每轮现挑 —— 所以换镜像不会让 `.part.url` 记号
+//! 失配、也就不会丢掉几个 GB 的续传点。非 GitHub 链接原样返回、一个请求都不多发。
+//!
 //! ⚠️ 查「还有没有漏掉的调用方」别按函数名或 `bytes_stream` 找：
 //! `ipc::media::preview_fetch` 用的是 `res.chunk()`、`lyrics::save_stream` 短得
 //! 不像下载器。按**行为**找：任何「读 HTTP 响应 → 写进文件」的循环。
@@ -208,6 +212,9 @@ impl Retry {
 /// 一次下载要什么。
 #[derive(Clone)]
 pub struct Request<'a> {
+    /// **规范链接**（那个文件在官方站上的地址）。真正取字节的地址由 `ghmirror`
+    /// 现挑（只有 GitHub 链接会换），而 `.part.url` 记号记的是这里这个 ——
+    /// 记号跟着镜像走的话，换一面镜像就等于把几个 GB 的续传点作废。
     pub url: &'a str,
     /// 出错时怎么称呼它（「模型」「运行时」…）。空串 = 不点名。
     pub label: &'a str,
@@ -330,12 +337,17 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
         let _ = write_url_marker(req.part, req.url);
     }
 
+    /* 真正从哪儿取字节 —— 镜像加速（`ghmirror`）。`req.url` 始终是**规范链接**，
+       `.part.url` 记号记的也是它，所以换镜像不会让几个 GB 的续传点作废。
+       非 GitHub 链接原样返回，一个额外的请求都不发。 */
+    let mut fetch = crate::ghmirror::pick(req.url).await;
+
     // ── 总长与分段能力 ──
     let header_map = header_map(req.headers);
     let mut total: Option<u64> = None;
     let mut accept_ranges = false;
     if req.shape.probe() {
-        let (size, ranges) = probe(req.url, &header_map, req.client).await?;
+        let (size, ranges) = probe(&fetch, &header_map, req.client).await?;
         total = (size > 0).then_some(size);
         accept_ranges = ranges;
     }
@@ -358,11 +370,20 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
         if (ctl.check)() {
             return Ok(settle(ctl, req, start));
         }
+        if rounds > 1 {
+            /* 上一轮失败了 → 换一面镜像再来。规范链接没变，所以盘上的续传点还算数
+               （`.part.url` 记的是它，不是镜像地址）。
+               ⚠️ **只在失败之后换**：排名是开工前实测出来的，每轮都重测等于把吞吐
+               反复押在刚测出来的那条线路上，而换个镜像并不需要重测（`ghmirror`
+               记着整张名次表）。 */
+            crate::ghmirror::discard(req.url);
+            fetch = crate::ghmirror::pick(req.url).await;
+        }
 
         let attempt = if chunked {
             let t = total.unwrap_or(0);
             let tracker = Tracker::new(total, note);
-            match download_chunked(req, &header_map, t, &tracker, ctl).await {
+            match download_chunked(&fetch, req, &header_map, t, &tracker, ctl).await {
                 Ok(()) => Ok(tracker.received()),
                 // 用户让它停 → 不要退化成单流再跑一遍
                 Err(e) if e == STOPPED => Err(e),
@@ -375,7 +396,9 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
                        两边的错都留着：单流失败时把「分块为什么没成」也带上，
                        否则用户只看到最后那一句，排查时看不出真正的起因。 */
                     note(0, total, Stage::Download);
-                    match download_stream(req, &header_map, 0, &mut total, &tracker, ctl).await {
+                    match download_stream(&fetch, req, &header_map, 0, &mut total, &tracker, ctl)
+                        .await
+                    {
                         Ok(()) => Ok(tracker.received()),
                         Err(stream_err) if stream_err == STOPPED => Err(stream_err),
                         Err(stream_err) => {
@@ -386,7 +409,7 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
             }
         } else {
             let tracker = Tracker::new(total, note);
-            match download_stream(req, &header_map, start, &mut total, &tracker, ctl).await {
+            match download_stream(&fetch, req, &header_map, start, &mut total, &tracker, ctl).await {
                 Ok(()) => Ok(tracker.received()),
                 Err(e) => Err(e),
             }
@@ -511,6 +534,7 @@ fn header_map(pairs: &[(&str, &str)]) -> HeaderMap {
 
 /// 单流下：从 `start` 起顺序追加。`total` 会被响应头补全（如果还不知道）。
 async fn download_stream(
+    fetch: &str,
     req: &Request<'_>,
     hdrs: &HeaderMap,
     start: u64,
@@ -525,13 +549,25 @@ async fn download_stream(
             HeaderValue::from_str(&format!("bytes={start}-")).map_err(|e| e.to_string())?,
         );
     }
-    let res = req.client.get(req.url).headers(h)
+    let res = req.client.get(fetch).headers(h)
         .send()
         .await
         .map_err(|e| format!("{}失败：{}", what(req.label), friendly(&e)))?;
     let status = res.status().as_u16();
+    /* 416 = 服务端说「这个区间不存在」：`start` 已经不小于整个文件了，也就是盘上
+       那一份**已经下全**（续传时对着一整卷再要一次就是这个症状）。分卷下载全靠
+       这一条：卷是按顺序下的，中间停一次之后前面那几卷都是一整份。
+       ⚠️ 只有 `Resumable` 能这么读 —— 它写的是「同一条链接的追加流」，`start`
+       就是盘上已有的字节数；`Plain` 不续传，416 只能是真的出错。 */
+    if status == 416 && start > 0 && req.shape.resumable() {
+        tracker.reset(start);
+        tracker.tick(start, *total);
+        return Ok(());
+    }
     if !(200..300).contains(&status) {
-        return Err(format!("{}失败：HTTP {status}", what(req.label)));
+        /* ⚠️ 带上真正用的那个地址：走镜像时一句「HTTP 404」分不出是这一面镜像挂了、
+           还是发布点上真没这个文件 —— 而这两件事的处置完全不同。 */
+        return Err(format!("{}失败：HTTP {status}（{fetch}）", what(req.label)));
     }
     // 206 = 服务端认了 Range；200 = 不认，要从头写
     let resumed = status == 206 && start > 0;
@@ -575,6 +611,7 @@ async fn download_stream(
 
 /// 按 `threads` 切段并行下，各写各的偏移。
 async fn download_chunked(
+    fetch: &str,
     req: &Request<'_>,
     hdrs: &HeaderMap,
     total: u64,
@@ -601,7 +638,7 @@ async fn download_chunked(
     // 也就不需要把回调塞进 'static。
     let futs = ranges
         .into_iter()
-        .map(|(s, e)| download_range(req, hdrs, s, e, tracker, ctl));
+        .map(|(s, e)| download_range(fetch, req, hdrs, s, e, tracker, ctl));
     for r in futures_util::future::join_all(futs).await {
         r?;
     }
@@ -609,6 +646,7 @@ async fn download_chunked(
 }
 
 async fn download_range(
+    fetch: &str,
     req: &Request<'_>,
     hdrs: &HeaderMap,
     start: u64,
@@ -621,7 +659,7 @@ async fn download_range(
         if (ctl.check)() {
             return Err(STOPPED.to_string());
         }
-        match download_range_once(req, hdrs, start, end, tracker).await {
+        match download_range_once(fetch, req, hdrs, start, end, tracker).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last = e;
@@ -635,6 +673,7 @@ async fn download_range(
 }
 
 async fn download_range_once(
+    fetch: &str,
     req: &Request<'_>,
     hdrs: &HeaderMap,
     start: u64,
@@ -646,13 +685,13 @@ async fn download_range_once(
         reqwest::header::RANGE,
         HeaderValue::from_str(&format!("bytes={start}-{end}")).map_err(|e| e.to_string())?,
     );
-    let res = req.client.get(req.url).headers(h)
+    let res = req.client.get(fetch).headers(h)
         .send()
         .await
         .map_err(|e| friendly(&e))?;
     let status = res.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(format!("分块下载失败 HTTP {status}"));
+        return Err(format!("分块下载失败 HTTP {status}（{fetch}）"));
     }
 
     /* ⚠️ **必须是可写的句柄。** 用 `File::open`（`O_RDONLY`）时 Windows 的
@@ -1296,6 +1335,64 @@ Connection: close
         // 引擎开工前就查 check，所以这里不会真发请求
         let out = download(&req, &ctl, &|_, _, _| {}).await.unwrap();
         assert_eq!(out, Outcome::Cancelled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 续传时服务端回 `416`：盘上那一份**已经下全了**，这一轮算成功。
+    ///
+    /// 分卷下载全靠这一条：卷是按顺序下的，中间停一次之后前面那几卷都是一整份，
+    /// 而「这一卷下完没有」在下一轮开工时只能靠再要一次 `Range` 来问 ——
+    /// 服务端对「起点 == 文件末尾」的回法就是 416。不认它的表现是：用户暂停一次，
+    /// 再点「继续下载」时前面每一卷都报一次错、重试 5 轮、最后整个包失败。
+    #[tokio::test]
+    async fn a_416_means_the_part_on_disk_is_already_whole() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let hits2 = hits.clone();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut s) = conn else { continue };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                hits2.fetch_add(1, Ordering::Relaxed);
+                // ⚠️ 只回 416，一个字节的 body 都不给 —— 引擎不该把它当成失败
+                let _ = s.write_all(
+                    b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/x.bin");
+
+        let dir = tmp("range-416");
+        let part = dir.join("x.part");
+        std::fs::write(&part, vec![3u8; 1000]).unwrap();
+        // 记号要指同一条链接，否则引擎会当成「别人的半个包」从头下
+        write_url_marker(&part, &url).unwrap();
+
+        let req = Request {
+            url: &url,
+            label: "分卷",
+            part: &part,
+            headers: &[],
+            shape: Shape::Resumable,
+            client: default_client(),
+            retry: Retry::BIG_PACK,
+            expect: None,
+        };
+        let out = download(&req, &no_stop(), &|_, _, _| {}).await.unwrap();
+        assert_eq!(
+            out,
+            Outcome::Done { bytes: 1000 },
+            "盘上那一卷已经下全了，416 该被当成「下完了」"
+        );
+        assert_eq!(std::fs::metadata(&part).unwrap().len(), 1000, "416 不该往文件里写东西");
+        assert_eq!(
+            hits.load(Ordering::Relaxed),
+            1,
+            "416 是成功收场，不该再重试"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

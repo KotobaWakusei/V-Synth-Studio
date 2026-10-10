@@ -13,6 +13,7 @@ mod audio;
 mod bili;
 mod data;
 mod game;
+mod ghmirror;
 mod ipc;
 mod libresvip;
 mod lyrics;
