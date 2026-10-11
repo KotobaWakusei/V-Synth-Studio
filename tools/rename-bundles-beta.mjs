@@ -27,11 +27,14 @@ const productName = JSON.parse(fs.readFileSync(path.join(HERE, 'src-tauri/tauri.
 const KINDS = {
   macos: [{sub: 'dmg', ext: '.dmg'}],
   windows: [{sub: 'msi', ext: '.msi'}],
+  // deb 的名字是 `<productName>_<x.y.z>_<arch>.deb`（见 tauri-bundler 的 debian.rs），
+  // 与 MSI 一样在版本段后面补 beta。
+  linux: [{sub: 'deb', ext: '.deb'}],
 }
 
 const kinds = KINDS[PLATFORM]
 if (!kinds) {
-  say(`✗ 这个脚本只覆盖 macOS 与 Windows，当前平台是 ${PLATFORM}`)
+  say(`✗ 这个脚本只覆盖 macOS / Windows / Linux，当前平台是 ${PLATFORM}`)
   process.exit(1)
 }
 

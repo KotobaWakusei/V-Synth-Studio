@@ -65,14 +65,17 @@ use std::path::Path;
 const ANY: &str = "any";
 const WIN: &str = "windows";
 const MAC: &str = "macos";
+const LINUX: &str = "linux";
 
 const MUST_HAVE: &[(&str, &str, &str)] = &[
     ("../data/resources.json", "资源库清单（resolve_paths 的启动哨兵）", ANY),
     ("../data/pinyin.json", "拼音词典", ANY),
     ("../tools/ffmpeg/bin/ffmpeg.exe", "ffmpeg（音频转换 / 合并 / 扒谱解码）", WIN),
     ("../tools/ffmpeg/bin/ffmpeg", "ffmpeg（同左，macOS 版）", MAC),
+    ("../tools/ffmpeg/bin/ffmpeg", "ffmpeg（同左，Linux 版）", LINUX),
     ("../tools/yt-dlp.exe", "yt-dlp（MV 解析下载）", WIN),
     ("../tools/yt-dlp", "yt-dlp（同左，macOS 版）", MAC),
+    ("../tools/yt-dlp", "yt-dlp（同左，Linux 版）", LINUX),
     (
         "../tools/libresvip/libresvip-cli/libresvip-cli.exe",
         "LibreSVIP（工程格式互转）",
@@ -82,6 +85,11 @@ const MUST_HAVE: &[(&str, &str, &str)] = &[
         "../tools/libresvip/libresvip-cli/libresvip-cli",
         "LibreSVIP（同左，macOS 版）",
         MAC,
+    ),
+    (
+        "../tools/libresvip/libresvip-cli/libresvip-cli",
+        "LibreSVIP（同左，Linux 版）",
+        LINUX,
     ),
     /* ⚠️ 这条必须留着：exe 在、插件目录空 = 工程格式互转认不出任何格式，且不报错。
        只查 exe 是不够的，所以这里连插件目录一起数。 */
@@ -100,6 +108,11 @@ const MUST_HAVE: &[(&str, &str, &str)] = &[
         "../tools/onnxruntime/libonnxruntime.dylib",
         "ONNX Runtime（同左，macOS 版）",
         MAC,
+    ),
+    (
+        "../tools/onnxruntime/libonnxruntime.so",
+        "ONNX Runtime（同左，Linux 版）",
+        LINUX,
     ),
     /* jizura 经 `frontendDist` 进包（Vite 把 `public/` 拷进 `dist/`），机制与
        `bundle.resources` 不同，但缺了的后果一样 —— PV 页静默少字体。这四条都不是
@@ -143,7 +156,7 @@ fn should_check(target_os: &str, profile: &str, forced: bool, skipped: bool) -> 
     if skipped {
         return false; // 跳过优先于强制，否则「绕过」没法用
     }
-    forced || (matches!(target_os, WIN | MAC) && profile == "release")
+    forced || (matches!(target_os, WIN | MAC | LINUX) && profile == "release")
 }
 
 fn check_resources() {

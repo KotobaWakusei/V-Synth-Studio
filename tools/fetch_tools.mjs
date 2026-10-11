@@ -65,7 +65,12 @@ const UPSTREAM = {
   // lgpl 全都有。gpl 档多带 x264/x265，而程序从不编码视频（6 处调用都是 `-vn`）。
   ffmpeg: {
     windows: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip',
-    linux: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz',
+    /* 与 macOS 档同理：只吃 lgpl，且是 `.tar.xz`（解它要系统 `xz`）。
+       ⚠️ 按架构分列 —— linux64 与 linuxarm64 是两个不同的构建，取错了到用户机器上才现形。 */
+    linux: {
+      x64: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz',
+      arm64: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-lgpl.tar.xz',
+    },
     /* BtbN 不出 macOS 档，而 macOS 上的静态构建几乎都是 GPL。挑 jellyfin-ffmpeg 的可携包：
        GitHub 上钉 tag、全功能（它本来就是给转码用的），本程序要的 `atempo` / `asetrate` /
        `loudnorm` / mp4 与 matroska 的拆与合都在里面。
@@ -80,13 +85,20 @@ const UPSTREAM = {
   },
   ytdlp: {
     windows: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe',
-    linux: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux',
+    linux: {
+      x64: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux',
+      arm64: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux_aarch64',
+    },
     macos: 'https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos',
   },
   // LibreSVIP 的 CLI 三端都发（`*-CLI-<版本>.<平台>-<架构>.tar.gz`）。
   // ⚠️ macOS 的包里有符号链接（`_internal/Python`），解压器要真的建出链接来。
   libresvip: {
     windows: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.win-amd64.zip',
+    linux: {
+      x64: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.linux-x86_64.tar.gz',
+      arm64: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.linux-aarch64.tar.gz',
+    },
     macos: {
       arm64: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.macos-arm64.tar.gz',
       x64: 'https://github.com/SoulMelody/LibreSVIP/releases/download/v2.9.0/LibreSVIP-CLI-2.9.0.macos-x86_64.tar.gz',
@@ -95,7 +107,14 @@ const UPSTREAM = {
   // ONNX Runtime 官方 release。整包里只拎出那一个动态库。
   onnxruntime: {
     windows: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip',
-    linux: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz',
+    /* CPU 构建（与 Windows 随包的那份对齐）：GPU 构建是 240 MB 的包、解出 368 MB 的
+       `libonnxruntime_providers_cuda.so`，而 Linux 上没有音轨分离运行时可以借 CUDA 版
+       —— 想要 GPU 推理得自己把一份带 CUDA provider 的 ORT 放进 `<可写>/midi`
+       （`midi_transcribe::runtime_dll` 认得）。 */
+    linux: {
+      x64: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz',
+      arm64: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-aarch64-1.23.2.tgz',
+    },
     macos: {
       arm64: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz',
       x64: 'https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz',
@@ -197,15 +216,17 @@ function installLibresvip(ex, base) {
 /**
  * 上游包里那个动态库的**真身**。
  *
- * ⚠️ macOS / Linux 的包里它带版本号（`libonnxruntime.1.23.2.dylib`），不带版本号的那个
- * 是**符号链接**；而 `walkFiles` 不跟符号链接（见 lib.mjs），照名字找会找不到。
+ * ⚠️ macOS / Linux 的包里它带版本号、不带版本号的那个是**符号链接**，而 `walkFiles`
+ * 不跟符号链接（见 lib.mjs），照名字找会找不到。两种平台的版本号位置**不同**：
+ *   macOS  `libonnxruntime.1.23.2.dylib`（版本号在扩展名**前**）
+ *   Linux  `libonnxruntime.so.1.23.2`  （版本号在扩展名**后**）
  * 落点仍然写成不带版本号的名字 —— `artifact/mod.rs` 的 `NameKind::Dll` 认的就是它。
  */
 function onnxruntimeSource(ex, name) {
   const direct = findOne(ex, name)
   if (direct) return direct
   const stem = name.replace(/\.(dylib|so)$/, '')
-  const versioned = new RegExp(`^${stem}\\.\\d[^/]*\\.(dylib|so)$`)
+  const versioned = new RegExp(`^${stem}(?:\\.\\d[^/]*\\.(?:dylib|so)|\\.(?:dylib|so)\\.\\d[^/]*)$`)
   return walkFiles(ex).find((f) => versioned.test(path.basename(f))) ?? null
 }
 

@@ -367,14 +367,16 @@ export function checkTablesAgree(root = HERE) {
   if (!fs.existsSync(buildRs)) return [`找不到 ${buildRs}，无法核对`]
 
   const text = fs.readFileSync(buildRs, 'utf8')
-  /* `MUST_HAVE` 的每一行是 `(路径, 说明, 平台)`。平台那一列取 `ANY` / `WIN` / `MAC`
-     三个常量名（build.rs 那边展开成 `CARGO_CFG_TARGET_OS` 的取值）。
+  /* `MUST_HAVE` 的每一行是 `(路径, 说明, 平台)`。平台那一列取 `ANY` / `WIN` / `MAC` /
+     `LINUX` 四个常量名（build.rs 那边展开成 `CARGO_CFG_TARGET_OS` 的取值）。
      ⚠️ 收尾符要同时认 `)` 与 `,`：表里既有写成一行的、也有折成三行的。
      ⚠️ 只对照**本平台**的行：另一平台的二进制在这台机器上本来就不该存在，
-     参与对照必然红。 */
-  const TAG = {ANY: null, WIN: 'windows', MAC: 'macos'}
+     参与对照必然红。
+     ⚠️ 正则里的平台名要与 `TAG` 的键逐字一致：漏掉一个（如 `LINUX`）不会报错，
+     那条会被静默跳过 —— 表现为本平台的产物漏检。 */
+  const TAG = {ANY: null, WIN: 'windows', MAC: 'macos', LINUX: 'linux'}
   const listed = new Set()
-  for (const m of text.matchAll(/^\s*\(\s*"([^"]+)"\s*,\s*"[^"]*"\s*,\s*(ANY|WIN|MAC)\s*[),]/gm)) {
+  for (const m of text.matchAll(/^\s*\(\s*"([^"]+)"\s*,\s*"[^"]*"\s*,\s*(ANY|WIN|MAC|LINUX)\s*[),]/gm)) {
     const only = TAG[m[2]]
     if (only && only !== PLATFORM) continue
     listed.add(m[1])

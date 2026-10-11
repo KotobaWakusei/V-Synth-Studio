@@ -1,7 +1,7 @@
-# 编译 + 打包安装包：macOS 出 DMG，Windows 出 MSI 与 NSIS exe。
+# 编译 + 打包安装包：macOS 出 DMG，Windows 出 MSI 与 NSIS exe，Linux 出 DEB。
 #
 # 手动跑：Actions → 打包安装包 → Run workflow。打 tag 跑：`git tag v1.4.0 && git push origin v1.4.0`。
-# 两个平台是同一个 job 的矩阵，差异全在 `matrix` 里；补齐/顺序等约束见「如何编译打包.md」第四节。
+# 三个平台是同一个 job 的矩阵，差异全在 `matrix` 里；补齐/顺序等约束见「如何编译打包.md」第四节。
 #
 # ⚠️ 新 workflow 首次推送后可能不被 Actions 索引（Actions 页空的、`total_count = 0`）。
 #    空提交没用 —— 必须改到 `.github/workflows/**` 里的文件本身才会被重新解析注册。
@@ -55,6 +55,23 @@ jobs:
             releaseFiles: |
               src-tauri/target/release/bundle/dmg/*.dmg
 
+          # ubuntu-22.04 而不是 ubuntu-latest：`latest` 会随 GitHub 换（现在是 24.04），
+          # 而 .deb 里的 glibc 下限跟着构建机走 —— 用 22.04 打出来的包在更老的发行版上
+          # 也装得上。换构建机等于悄悄抬高用户的要求，所以要显式钉住。
+          #
+          # 只出 deb（不出 AppImage）：AppImage 要额外拉 appimagetool、还要 FUSE，
+          # 这些都不随 GitHub 镜像预装 —— 为一件装法在 CI 里多一条易碎的路不值。
+          # 想要 AppImage 的人在本地 `pnpm exec tauri build --bundles appimage` 就行。
+          - os: ubuntu-22.04
+            label: Linux (DEB)
+            slug: deb
+            target: x86_64-unknown-linux-gnu
+            bundleArgs: --bundles deb
+            timeout: 90
+            bundleGlob: src-tauri/target/release/bundle/deb/*.deb
+            releaseFiles: |
+              src-tauri/target/release/bundle/deb/*.deb
+
           # windows-latest 上预装了 MSVC + Windows SDK（链接需要）、Node.js、Edge。
           # 不加 `--bundles`：默认按 `tauri.conf.json` 的 `"targets": "all"` 出 MSI 与 NSIS exe。
           - os: windows-latest
@@ -104,12 +121,25 @@ jobs:
       - name: 装前端依赖
         run: pnpm install --frozen-lockfile
 
-      # ffmpeg 的 macOS 可携包是 `.tar.xz`，而 Node 没有 liblzma（见 tools/archive.mjs）——
-      # 解它要系统的 `xz`。镜像里通常自带，没有就装一个（`brew` 在 arm64 上是
-      # /opt/homebrew，别写死路径）。
+      # ffmpeg 的 macOS / Linux 档都是 `.tar.xz`，而 Node 没有 liblzma（见 tools/archive.mjs）
+      # —— 解它要系统的 `xz`。两个镜像里通常都自带，没有就各自装一个
+      # （`brew` 在 arm64 上是 /opt/homebrew，别写死路径）。
       - name: 确保有 xz（解 ffmpeg 的 .tar.xz 用）
         if: runner.os == 'macOS'
         run: command -v xz >/dev/null || brew install xz
+
+      - name: 确保有 xz（解 ffmpeg 的 .tar.xz 用）
+        if: runner.os == 'Linux'
+        run: command -v xz >/dev/null || sudo apt-get install -y xz-utils
+
+      # Tauri 的 Linux 链接依赖（webkit2gtk 那一串）。镜像里不预装，缺一个就链接失败。
+      - name: 装 Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: 装 Rust
         uses: dtolnay/rust-toolchain@stable

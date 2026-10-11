@@ -4,16 +4,18 @@
  *
  *     node tools/smoke-package.mjs
  *
- * 判据按平台分叉，入口统一（CI 两个平台都只跑这一句）：
+ * 判据按平台分叉，入口统一（CI 三个平台都只跑这一句）：
  *   macOS   直接查 `.app` 目录树，最后**真跑**一遍随包二进制
  *   Windows 读 MSI 的 File 表；Node 没有 COM，读表那一步委托 tools/msi-file-table.ps1
+ *   Linux   解开 .deb（`ar` 归档里的 data.tar.gz），查 /usr/lib/<name> 那棵树并真跑二进制
  *
- * ⚠️ 两个平台都查不到「前端嵌进去了没有」：`frontendDist = dist/` 被 tauri-codegen
+ * ⚠️ 三个平台都查不到「前端嵌进去了没有」：`frontendDist = dist/` 被 tauri-codegen
  *    嵌进可执行文件，磁盘与 File 表里都看不见。所以用**体积**兜一道，拦「dist/ 是空的」。
  */
 
 import {spawnSync} from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -101,6 +103,85 @@ function smokeMac() {
   say(head(run(path.join(RES, 'tools/libresvip/libresvip-cli/libresvip-cli'), ['plugin', 'detail', 'svp']).out, 3))
 }
 
+// ── Linux：解开 .deb 查目录树 ────────────────────────────────────────
+//
+// deb 是个 `ar` 归档，两个成员：`control.tar.gz` 与 `data.tar.gz`。系统的 `/usr/bin/ar`
+// 就够解（不用 dpkg，CI 与开发机上都可能有、也可能没有 dpkg）。`data.tar.gz` 里，
+// 程序本体在 `usr/bin/v-synth-studio`、随包资源在 `usr/lib/v-synth-studio/`
+// —— 后者正是 Tauri `resource_dir()` 在 Linux 上的解析结果（见 tauri-utils
+// `platform.rs::resource_dir_from` 的 linux 分支）。
+function smokeLinux() {
+  const dir = path.join(HERE, 'src-tauri/target/release/bundle/deb')
+  const debs = fs.existsSync(dir) ? fs.readdirSync(dir).filter((n) => n.endsWith('.deb')) : []
+  check(debs.length === 1, `期望恰好一个 deb，实际 ${debs.length} 个（在 ${dir}）`)
+  const deb = path.join(dir, debs[0])
+  say(`deb: ${deb}   ${(fs.statSync(deb).size / MB).toFixed(1)} MB`)
+
+  // 解开：ar 抽成员 → 只取 data.tar.gz → 解到临时目录。
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'vss-smoke-'))
+  try {
+    const ar = spawnSync('ar', ['x', deb], {cwd: work, encoding: 'utf8', maxBuffer: 64 * MB})
+    check(ar.status === 0, `ar 解 deb 失败：${ar.error || ar.stderr}`)
+    const dataTgz = path.join(work, 'data.tar.gz')
+    check(fs.existsSync(dataTgz), 'deb 里没有 data.tar.gz —— 打包布局变了？')
+    const tar = spawnSync('tar', ['xzf', 'data.tar.gz', '-C', work], {cwd: work, encoding: 'utf8', maxBuffer: 64 * MB})
+    check(tar.status === 0, `解 data.tar.gz 失败：${tar.error || tar.stderr}`)
+
+    // 顶层就是 deb 的根（`usr/`、`DEBIAN` 不在这儿 —— 那在 control 成员里）。
+    const LIB = path.join(work, 'usr/lib/v-synth-studio')
+    const BIN = path.join(work, 'usr/bin/v-synth-studio')
+
+    // 出问题时第一眼要看的就是这棵树，先打一层
+    for (const rel of walkFiles(LIB).map((f) => path.relative(work, f)).sort().slice(0, 25)) say(rel)
+
+    // ① `bundle.resources` 真去装的那几项 + 程序本体。
+    const need = [
+      'usr/bin/v-synth-studio',
+      'usr/lib/v-synth-studio/data/resources.json',
+      'usr/lib/v-synth-studio/data/pinyin.json',
+      'usr/lib/v-synth-studio/tools/ffmpeg/bin/ffmpeg',
+      'usr/lib/v-synth-studio/tools/yt-dlp',
+      'usr/lib/v-synth-studio/tools/libresvip/libresvip-cli/libresvip-cli',
+      'usr/lib/v-synth-studio/tools/onnxruntime/libonnxruntime.so',
+    ]
+    for (const rel of need) check(fs.existsSync(path.join(work, rel)), `deb 里少了 ${rel}`)
+
+    // ② LibreSVIP 的插件目录不能是空壳（exe 在、插件没在 = 工程格式互转认不出任何格式，且不报错）。
+    const plugins = path.join(LIB, 'tools/libresvip/libresvip-cli/_internal/libresvip/plugins')
+    const n = walkFiles(plugins).length
+    say(`LibreSVIP 插件 ${n} 个文件`)
+    check(n > 50, `插件只有 ${n} 个文件，明显少打包了`)
+
+    // ③ 随包二进制必须是 x86_64。取错架构在编译期看不出来，到用户手里才现形。
+    for (const b of [BIN, path.join(LIB, 'tools/ffmpeg/bin/ffmpeg'), path.join(LIB, 'tools/yt-dlp'),
+                     path.join(LIB, 'tools/libresvip/libresvip-cli/libresvip-cli'),
+                     path.join(LIB, 'tools/onnxruntime/libonnxruntime.so')]) {
+      const r = spawnSync('file', [b], {encoding: 'utf8'})
+      check(/x86-64|x86_64/.test(r.stdout), `架构不对：${r.stdout.trim()}`)
+    }
+
+    // ④ 可执行文件的体积：前端（含 2335 个字体，约 64 MB）嵌在里面。拦「dist/ 是空的 / 很旧」。
+    const sz = fs.statSync(BIN).size
+    say(`可执行文件 ${(sz / MB).toFixed(0)} MB`)
+    check(sz > 40_000_000, '太小，前端/jizura 没嵌进去')
+
+    // ⑤ **真把它们跑一遍**：架构对不对、动没动态库、解出来完不完整，只有真执行才知道。
+    const FF = path.join(LIB, 'tools/ffmpeg/bin/ffmpeg')
+    say(head(run(FF, ['-version']).out, 1))
+    const encs = run(FF, ['-hide_banner', '-encoders']).out
+    for (const e of ['libmp3lame', 'libopus', 'libvorbis', 'aac', 'flac']) {
+      check(new RegExp(`[\\s]${e}[\\s]`).test(encs), `ffmpeg 里没有 ${e}`)
+    }
+    say(run(path.join(LIB, 'tools/yt-dlp'), ['--version']).out.trim())
+    // LibreSVIP 是 Python 打包出来的，真跑一次才验得出 `_internal/` 解完整了没有。
+    const rpc = run(path.join(LIB, 'tools/libresvip/libresvip-cli/libresvip-cli'), ['plugin', 'detail', 'svp'])
+    say(head(rpc.out, 3))
+    check(rpc.status === 0, 'libresvip-cli 跑不起来 —— _internal/ 没解完整？')
+  } finally {
+    fs.rmSync(work, {recursive: true, force: true})
+  }
+}
+
 // ── Windows：读 MSI 的 File 表 ────────────────────────────────────────
 function smokeWin() {
   const dir = path.join(HERE, 'src-tauri/target/release/bundle')
@@ -161,7 +242,8 @@ function smokeWin() {
 try {
   if (PLATFORM === 'macos') smokeMac()
   else if (PLATFORM === 'windows') smokeWin()
-  else throw new Error(`这个脚本只覆盖 macOS 与 Windows，当前平台是 ${PLATFORM}`)
+  else if (PLATFORM === 'linux') smokeLinux()
+  else throw new Error(`这个脚本只覆盖 macOS / Windows / Linux，当前平台是 ${PLATFORM}`)
 } catch (e) {
   say(`✗ ${e.message}`)
   process.exit(1)
