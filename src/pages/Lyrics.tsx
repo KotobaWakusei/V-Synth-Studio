@@ -245,6 +245,10 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
      */
     const flags = useRef({edited: false, init: false})
     const timer = useRef<number | null>(null)
+    /** 取词请求的序列号：只有最新一次的结果能落地（见 `loadLyric`） */
+    const loadSeq = useRef(0)
+    /** 上一次自动填进「文件名」的那个名字，用来区分「用户改过」与「我们填的」 */
+    const autoName = useRef('')
 
     useEffect(() => {
         if (flags.current.init || !state) return
@@ -311,17 +315,27 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     /**
      * 取词。`playable` 是搜索结果那条上的「能不能下」标记，**原样带进 `current`** ——
      * 后端取词接口不探测可下载性，只有搜索结果探测过（见 `downloadSong` 的重试用它挑版本）。
+     *
+     * ⚠️ **只认最后一次请求**（`loadSeq`）：搜索结果是一条条点的，点快了就有两次请求同时在
+     * 飞，而它们回来的顺序不保证与点单顺序一致 —— 不设防的话「选中的是 B，预览里是 A」。
+     * 三条取词路（搜索 / 链接 / 本地文件）都从这里过一遍同一个序列号，所以互相也抢不了。
      */
     const loadLyric = async (id: string | number, playable?: boolean) => {
+        const seq = ++loadSeq.current
         setPreviewErr(null)
         try {
             const res = await api.lyricsGet({source: 'netease', id})
+            if (seq !== loadSeq.current) return
             setDoc(res)
             setCurrent({...res, id, source: 'netease', playable})
-            // 文件名跟着歌名走，但**别踩掉用户已经填过的名字**
-            setName((prev) => prev.trim() || [res.song?.name, res.song?.artists].filter(Boolean).join(' - '))
+            /* 文件名跟着歌名走，但**用户自己改过就别动**（按「上一次自动填的那个」判，
+               而不是「非空就不动」—— 后者会让第二首歌的下载文件名还是第一首的） */
+            const suggested = [res.song?.name, res.song?.artists].filter(Boolean).join(' - ')
+            setName((prev) => (prev.trim() && prev !== autoName.current ? prev : suggested))
+            autoName.current = suggested
             if (!String(res.trans ?? '').trim()) onToast('这首歌没有翻译歌词，只能导出原文', 'info')
         } catch (e) {
+            if (seq !== loadSeq.current) return
             setPreviewErr(errText(e))
             onToast(errText(e), 'err')
         }
@@ -354,12 +368,16 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     const importPath = async (path: string) => {
         setImporting(true)
         setPreviewErr(null)
+        // 本地导入也算一次新的取词：把还在飞的搜索取词作废（见 `loadLyric`）
+        loadSeq.current += 1
         try {
             const res = await api.lyricsImport({path})
             const id = res.id ?? path
             setDoc(res)
             setCurrent({...res, id, source: res.source ?? 'file'})
-            setName((prev) => prev.trim() || [res.song?.name, res.song?.artists].filter(Boolean).join(' - '))
+            const suggested = [res.song?.name, res.song?.artists].filter(Boolean).join(' - ')
+            setName((prev) => (prev.trim() && prev !== autoName.current ? prev : suggested))
+            autoName.current = suggested
             if (res.encoding === 'unknown') {
                 onToast('这个文件既不是 UTF-8 也不是 GBK，显示出来可能是乱码', 'warn')
             } else {
