@@ -95,7 +95,9 @@ pub async fn midi_device_get(st: super::St<'_>) -> Cmd {
 pub async fn midi_device_set(st: super::St<'_>, mode: String) -> Cmd {
     let m = mode.trim().to_ascii_lowercase();
     if !["auto", "cpu", "gpu"].contains(&m.as_str()) {
-        return Err(format!("不认识的推理方式：{mode}（只能是 auto / cpu / gpu）"));
+        return Err(format!(
+            "不认识的推理方式：{mode}（只能是 auto / cpu / gpu）"
+        ));
     }
     let dev = mt::Device::parse(&m);
     mt::write_device(&st.inner().writable, dev).map_err(|e| format!("写推理方式失败：{e}"))?;
@@ -339,7 +341,17 @@ pub async fn midi_transcribe(st: super::St<'_>, args: Value) -> Cmd {
     let scratch = mt::data_dir(&writable).join("work");
     tokio::spawn(async move {
         run_job(
-            st2, id2, input_path, out_dir, scratch, root_dir, writable_dir, models, dll, opts, cancel,
+            st2,
+            id2,
+            input_path,
+            out_dir,
+            scratch,
+            root_dir,
+            writable_dir,
+            models,
+            dll,
+            opts,
+            cancel,
             stem,
         )
         .await;

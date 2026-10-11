@@ -165,7 +165,7 @@ impl AppState {
             writable: paths.writable,
             installed: paths.installed,
             /* 安装时选的语言：读一次就够（见字段注释）。产品名与打包配置里的
-               `productName` 一致，也就是安装器写注册表时用的那个键名。 */
+            `productName` 一致，也就是安装器写注册表时用的那个键名。 */
             installer_lang: crate::platform::installer_language("v-synth-studio"),
             config: Mutex::new(config),
             previous_ext_dir,

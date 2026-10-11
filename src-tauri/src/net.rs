@@ -21,8 +21,8 @@ pub const DEFAULT_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWeb
 pub const CANCELED: &str = "__canceled__";
 
 /* ⚠️ 分块的阈值（2 MB）与「什么时候才算值得分块」的判据只在
-   `crate::download` 里声明一次 —— `net.rs` 不是下载的实现，只是它的一个
-   适配层（把引擎的原始字节数换算成界面要的 `speed` / `percent`）。 */
+`crate::download` 里声明一次 —— `net.rs` 不是下载的实现，只是它的一个
+适配层（把引擎的原始字节数换算成界面要的 `speed` / `percent`）。 */
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
@@ -194,7 +194,7 @@ pub async fn download_to_file(
     on_progress: &OnProgress,
 ) -> Result<u64, String> {
     /* 节流 + 换算都在这层做（引擎每收到一块就调我们一次，几 MB 的包会有上千次）。
-       200ms 一次。 */
+    200ms 一次。 */
     let started = std::time::Instant::now();
     let last_emit = std::sync::Mutex::new(started);
     let emit = |got: u64, total: Option<u64>| {
@@ -409,7 +409,11 @@ mod tests {
                     Some((a, b)) => ("206 Partial Content", a.min(total), b.min(total - 1)),
                     None => ("200 OK", 0, total.saturating_sub(1)),
                 };
-                let body = if total == 0 { &[][..] } else { &payload[from..=to] };
+                let body = if total == 0 {
+                    &[][..]
+                } else {
+                    &payload[from..=to]
+                };
                 let mut resp = format!(
                     "HTTP/1.1 {code}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\
                      Connection: close\r\n",
@@ -485,7 +489,12 @@ mod tests {
 
         数对了才有意义：4 块（5 MB / 4 线程）+ 1 次 `probe` 的 `bytes=0-0`。
         ⛔ 别把它放宽回 `> 1`。 */
-        let ranges = log.lock().unwrap().iter().filter(|h| parse_range(h).is_some()).count();
+        let ranges = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| parse_range(h).is_some())
+            .count();
         assert_eq!(
             ranges, 5,
             "分块正常时应为 4 块 + 1 次 probe = 5，实际 {ranges} 次；\
@@ -505,13 +514,23 @@ mod tests {
 
         let never = || false;
         let cancel: &(dyn Fn() -> bool + Send + Sync) = &never;
-        let got = download_to_file(&url, &dest, &[], 1, cancel, &|_| {}).await.unwrap();
+        let got = download_to_file(&url, &dest, &[], 1, cancel, &|_| {})
+            .await
+            .unwrap();
 
         assert_eq!(got, payload.len() as u64);
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
         // probe 先发一个 `bytes=0-0`；单流本身不带 Range
-        let ranges = log.lock().unwrap().iter().filter(|h| parse_range(h).is_some()).count();
-        assert_eq!(ranges, 1, "只该有 probe 那一个 Range 请求，实际 {ranges} 个");
+        let ranges = log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| parse_range(h).is_some())
+            .count();
+        assert_eq!(
+            ranges, 1,
+            "只该有 probe 那一个 Range 请求，实际 {ranges} 个"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -599,10 +618,16 @@ mod tests {
         };
         let never = || false;
         let cancel: &(dyn Fn() -> bool + Send + Sync) = &never;
-        download_to_file(&url, &dest, &[], 4, cancel, &sink).await.unwrap();
+        download_to_file(&url, &dest, &[], 4, cancel, &sink)
+            .await
+            .unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
-        assert_eq!(LAST.load(Ordering::Relaxed), 100_000, "结束时 percent 应该是 100");
+        assert_eq!(
+            LAST.load(Ordering::Relaxed),
+            100_000,
+            "结束时 percent 应该是 100"
+        );
         assert_eq!(SAW_SPEED.load(Ordering::Relaxed), 1, "speed 应该报过正数");
         let _ = std::fs::remove_dir_all(&dir);
     }

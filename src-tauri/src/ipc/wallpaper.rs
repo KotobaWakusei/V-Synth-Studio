@@ -35,7 +35,9 @@ pub async fn wallpaper_pkg(path: String) -> Result<tauri::ipc::Response, String>
     if !p.is_file() {
         return Err(format!("场景包不存在：{}", p.display()));
     }
-    let size = std::fs::metadata(&p).map_err(|e| format!("读不了文件属性：{e}"))?.len();
+    let size = std::fs::metadata(&p)
+        .map_err(|e| format!("读不了文件属性：{e}"))?
+        .len();
     if size > MAX_PKG_BYTES {
         return Err(format!(
             "场景包 {:.0} MB，超过上限 {:.0} MB",

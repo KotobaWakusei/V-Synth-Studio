@@ -232,7 +232,8 @@ function Appearance({
                 <PanelHead title={t("语言")} desc={t("选择应用界面语言")}/>
                 <div className="choice-grid">
                     {([["zh-CN", "简体中文"], ["en-US", "English"], ["ja-JP", "日本語"]] as const).map(([id, label]) => (
-                        <button key={id} type="button" className="choice" aria-pressed={language === id} onClick={() => setLanguage(id)}>
+                        <button key={id} type="button" className="choice" aria-pressed={language === id}
+                                onClick={() => setLanguage(id)}>
                             <span className="choice-head">
                                 <span className="choice-label">{t(label)}</span>
                                 {language === id && <Chip tone="accent">{t("已选")}</Chip>}

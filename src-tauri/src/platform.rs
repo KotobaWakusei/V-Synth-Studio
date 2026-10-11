@@ -251,7 +251,11 @@ const SVSEP_LOCAL_WHY: &str = "离线分离的运行时包是 Windows 专属（p
 ///
 /// 界面置灰用它，命令层拒绝也用它 —— 同一句话只写一份，别在两边各编一句。
 pub fn local_engine_why() -> Option<&'static str> {
-    if cfg!(windows) { None } else { Some(SVSEP_LOCAL_WHY) }
+    if cfg!(windows) {
+        None
+    } else {
+        Some(SVSEP_LOCAL_WHY)
+    }
 }
 
 /// 哪些功能在这个平台上**根本做不到**。
@@ -303,14 +307,22 @@ mod tests {
                 assert!(c.get("why").is_none(), "{name} 可用就不该带原因");
             } else {
                 assert!(
-                    c.get("why").and_then(|w| w.as_str()).is_some_and(|w| !w.is_empty()),
+                    c.get("why")
+                        .and_then(|w| w.as_str())
+                        .is_some_and(|w| !w.is_empty()),
                     "{name} 不可用却没有原因 —— 界面只能显示一句空话"
                 );
             }
         }
         // Windows 是唯一出货平台，这几项在它上面必须都是可用的
         if cfg!(windows) {
-            for name in ["wallpaper", "svsepLocal", "svsepDirectml", "midiGpu", "trash"] {
+            for name in [
+                "wallpaper",
+                "svsepLocal",
+                "svsepDirectml",
+                "midiGpu",
+                "trash",
+            ] {
                 assert_eq!(
                     obj[name].get("ok").and_then(|b| b.as_bool()),
                     Some(true),

@@ -180,16 +180,16 @@ function palette(): Record<string, string> {
  * **没波形也要能剪**是硬要求。
  */
 export function WaveEditor({
-                        path,
-                        duration,
-                        usable,
-                        segments,
-                        selected,
-                        onChange,
-                        onExport,
-                        onExportAll,
-                        onToast,
-                    }: {
+                               path,
+                               duration,
+                               usable,
+                               segments,
+                               selected,
+                               onChange,
+                               onExport,
+                               onExportAll,
+                               onToast,
+                           }: {
     path: string
     duration: number
     /** 有素材、且探测没报错，才去解码（解码失败不影响选段和导出） */

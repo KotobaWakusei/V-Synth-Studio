@@ -139,8 +139,8 @@ fn cookie_of(cfg: &Value) -> String {
 /// 用户只能自己去翻 `config.json` 才看得出哪里不对。返回的 `Err` 是给用户看的一句话。
 pub fn clean_cookie(raw: &str) -> Result<String, String> {
     /* 逐字符折叠：分号是唯一的分隔符，它两侧统一成 `; `（**分号不能丢** ——
-       粘贴来源常常把 `;` 也换成一行的结尾，只按空白折叠会把两对键值粘成一串）；
-       其余空白一律压成单个 ASCII 空格。 */
+    粘贴来源常常把 `;` 也换成一行的结尾，只按空白折叠会把两对键值粘成一串）；
+    其余空白一律压成单个 ASCII 空格。 */
     let mut folded = String::with_capacity(raw.len());
     let mut pending_space = false;
     for c in raw.chars() {
@@ -294,7 +294,7 @@ async fn save_stream(
         headers: &hdrs,
         shape: crate::download::Shape::Plain,
         /* ⚠️ 这里的 client 必须是 `media_client`（挂用户配的代理），不能换成
-           默认那个。防卡死靠它的 `read_timeout`，不在引擎这边叠总超时。 */
+        默认那个。防卡死靠它的 `read_timeout`，不在引擎这边叠总超时。 */
         client,
         // 不重试：直链失效由上层换链接（`ipc/lyrics.rs` 有那套逻辑）
         retry: crate::download::Retry::NONE,
@@ -818,14 +818,20 @@ pub async fn download_song(
     let size = save_stream(&client, &direct, DEFAULT_UA, REFER_NETEASE, "", &part).await?;
 
     if size == 0 {
-        return Err(discard(&part, "下载到的音频是空的（直链可能已经失效，重试一次通常就好了）"));
+        return Err(discard(
+            &part,
+            "下载到的音频是空的（直链可能已经失效，重试一次通常就好了）",
+        ));
     }
 
     // 直链失效时 CDN 可能回一页 HTML 而不是音频。格式也以文件头为准 ——
     // 接口的 `type` 会与实际内容不符（实测求 flac 时 `type` 写的是 mp3）
     let head = read_head(&part, 16);
     let Some(format) = audio_format(&head) else {
-        return Err(discard(&part, "拿到的不是音频数据（直链可能已经过期，重试一次通常就好了）"));
+        return Err(discard(
+            &part,
+            "拿到的不是音频数据（直链可能已经过期，重试一次通常就好了）",
+        ));
     };
 
     // 服务端给了准确体积就核对一遍：短一截说明传输中途断了
@@ -1183,7 +1189,11 @@ pub async fn account_info(cfg: &Value) -> AccountInfo {
     // account.vipType 是标量、profile.vipType 是位掩码，两者含义不同 —— 标量优先
     let vip_type = {
         let a = n(&json, "/account/vipType");
-        if a != 0 { a } else { n(&json, "/profile/vipType") }
+        if a != 0 {
+            a
+        } else {
+            n(&json, "/profile/vipType")
+        }
     };
     let level = vip_level(&client, &cookie).await;
 
@@ -1237,7 +1247,11 @@ pub async fn refresh_login(cfg: &Value) -> Option<(String, i64)> {
         return None;
     }
     if renewed.contains("MUSIC_U") {
-        let at = if expiry > 0 { expiry } else { now_secs() + COOKIE_TTL_SECONDS };
+        let at = if expiry > 0 {
+            expiry
+        } else {
+            now_secs() + COOKIE_TTL_SECONDS
+        };
         return Some((renewed, at));
     }
     Some((cookie, now_secs() + COOKIE_TTL_SECONDS))
@@ -1354,7 +1368,11 @@ pub async fn cellphone_login(
     // 1) 响应体里的 cookie（老版接口的形状），2) Set-Cookie 响应头（现在多半走这条）
     for candidate in [s(&json, "/cookie"), from_header] {
         if candidate.contains("MUSIC_U") {
-            let at = if expiry > 0 { expiry } else { now_secs() + COOKIE_TTL_SECONDS };
+            let at = if expiry > 0 {
+                expiry
+            } else {
+                now_secs() + COOKIE_TTL_SECONDS
+            };
             return Ok((candidate, at));
         }
     }
@@ -1742,7 +1760,7 @@ fn gbk_to_string(bytes: &[u8]) -> Option<String> {
 #[cfg(unix)]
 fn gbk_to_string(bytes: &[u8]) -> Option<String> {
     /* macOS 的 libc 把 `iconv_*` 标了 deprecated（它不想让 std 静态链接 libiconv），
-       而这里正是有意用它 —— 不引 crate 的代价就是这几个符号。 */
+    而这里正是有意用它 —— 不引 crate 的代价就是这几个符号。 */
     #[allow(deprecated)]
     unsafe {
         let cd = libc::iconv_open(c"UTF-8".as_ptr(), c"GBK".as_ptr());
@@ -1750,7 +1768,7 @@ fn gbk_to_string(bytes: &[u8]) -> Option<String> {
             return None;
         }
         /* UTF-8 每字符最多 4 字节、GBK 每字符 2 字节，4× 输入再加余量必够 ——
-           不够的话 iconv 会回 E2BIG，那按下面 `rc == usize::MAX` 当失败。 */
+        不够的话 iconv 会回 E2BIG，那按下面 `rc == usize::MAX` 当失败。 */
         let cap = bytes.len() * 4 + 4;
         let mut out = vec![0u8; cap];
         let mut in_ptr = bytes.as_ptr() as *mut libc::c_char;
@@ -1760,7 +1778,7 @@ fn gbk_to_string(bytes: &[u8]) -> Option<String> {
         let rc = libc::iconv(cd, &mut in_ptr, &mut in_left, &mut out_ptr, &mut out_left);
         libc::iconv_close(cd);
         /* `in_left != 0` = 中途撞上非法序列：宁可整个判失败（调用方回退有损解码、
-           让用户看到乱码），也不要返回「前半截对、后半截错」的文本。 */
+        让用户看到乱码），也不要返回「前半截对、后半截错」的文本。 */
         if rc == usize::MAX || in_left != 0 {
             return None;
         }
@@ -2300,7 +2318,15 @@ mod tests {
     #[test]
     fn quality_chain_only_walks_down() {
         // 链必须从本档往下，不能往上：往上要只会拿到同一个降级结果，白费一次请求
-        assert_eq!(Quality::Lossless.chain(), vec![Quality::Lossless, Quality::Exhigh, Quality::Higher, Quality::Standard]);
+        assert_eq!(
+            Quality::Lossless.chain(),
+            vec![
+                Quality::Lossless,
+                Quality::Exhigh,
+                Quality::Higher,
+                Quality::Standard
+            ]
+        );
         assert_eq!(Quality::Standard.chain(), vec![Quality::Standard]);
         assert_eq!(Quality::Auto.chain().len(), 5);
     }
@@ -2351,7 +2377,10 @@ mod tests {
         // 认不出来的形状要报错，不能静默写进配置
         assert!(clean_cookie("=没有键名").is_err(), "键名为空要报错");
         assert!(clean_cookie("键 名=值").is_err(), "键名里有空格要报错");
-        assert!(clean_cookie(&"a=b;".repeat(70)).is_err(), "`=` 太多 ⇒ 多半是粘坏了");
+        assert!(
+            clean_cookie(&"a=b;".repeat(70)).is_err(),
+            "`=` 太多 ⇒ 多半是粘坏了"
+        );
     }
 
     #[test]
@@ -2378,7 +2407,10 @@ mod tests {
 
     #[test]
     fn audio_format_reads_the_magic_bytes() {
-        assert_eq!(audio_format(b"ID3\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"), Some("mp3"));
+        assert_eq!(
+            audio_format(b"ID3\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+            Some("mp3")
+        );
         assert_eq!(audio_format(&[0xFF, 0xFB, 0x90, 0x00]), Some("mp3"));
         assert_eq!(audio_format(b"fLaC\x00\x00\x00\x22"), Some("flac"));
         assert_eq!(audio_format(b"OggS\x00\x02\x00\x00"), Some("ogg"));
@@ -2469,7 +2501,10 @@ mod tests {
             ),
         );
         assert_eq!(cookie_expiry_from_set_cookie(&empty), 0);
-        assert_eq!(cookie_expiry_from_set_cookie(&reqwest::header::HeaderMap::new()), 0);
+        assert_eq!(
+            cookie_expiry_from_set_cookie(&reqwest::header::HeaderMap::new()),
+            0
+        );
     }
 
     #[test]

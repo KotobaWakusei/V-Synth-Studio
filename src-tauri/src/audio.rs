@@ -157,7 +157,9 @@ fn stream_line(line: &str) -> Option<(&'static str, &str)> {
 /// 音频流的 `44100 Hz`。
 fn sample_rate_of(desc: &str) -> f64 {
     // 形如 `44100 Hz, stereo, fltp`。Hz 前的数字就是采样率。
-    let Some(idx) = desc.find(" Hz") else { return 0.0 };
+    let Some(idx) = desc.find(" Hz") else {
+        return 0.0;
+    };
     let before = &desc[..idx];
     let digits: String = before
         .chars()
@@ -179,7 +181,9 @@ fn sample_rate_of(desc: &str) -> f64 {
 fn channels_of(desc: &str) -> f64 {
     let lower = desc.to_ascii_lowercase();
     // 「44100 Hz, stereo」：听诊点固定在 Hz 之后那一段
-    let Some(idx) = lower.find(" hz, ") else { return 0.0 };
+    let Some(idx) = lower.find(" hz, ") else {
+        return 0.0;
+    };
     let after = &lower[idx + " hz, ".len()..];
     let word: String = after
         .chars()
@@ -201,10 +205,10 @@ fn channels_of(desc: &str) -> f64 {
 /// 音频/视频流的码率（`128 kb/s`）。
 fn stream_bitrate_bps(desc: &str) -> f64 {
     /* 一条流的描述里 `kb/s` 只出现一次（`... 44100 Hz, stereo, fltp, 128 kb/s`），
-       但它前面还有采样率、声道这些东西，所以要**从右往左**找那个「数字 + 单位」
-       片段 —— 从左往右找会把 `44100 Hz` 里的东西当成码率。
+    但它前面还有采样率、声道这些东西，所以要**从右往左**找那个「数字 + 单位」
+    片段 —— 从左往右找会把 `44100 Hz` 里的东西当成码率。
 
-       取 `rfind` 之后往前抓数字：`... 128 kb/s` → 抓 `128`。 */
+    取 `rfind` 之后往前抓数字：`... 128 kb/s` → 抓 `128`。 */
     let lower = desc.to_ascii_lowercase();
     for unit in [" kb/s", " mb/s", " gb/s"] {
         if let Some(idx) = lower.rfind(unit) {
@@ -252,7 +256,10 @@ fn resolution_of(desc: &str) -> (f64, f64) {
         let Some(w) = digits_then(a) else { continue };
         let Some(h) = digits_then(b) else { continue };
         // 尺寸不会太大，避免把 `0x31637661` 那类当成分辨率
-        let (wv, hv) = (w.parse::<f64>().unwrap_or(0.0), h.parse::<f64>().unwrap_or(0.0));
+        let (wv, hv) = (
+            w.parse::<f64>().unwrap_or(0.0),
+            h.parse::<f64>().unwrap_or(0.0),
+        );
         if (16.0..=20000.0).contains(&wv) && (16.0..=20000.0).contains(&hv) {
             return (wv, hv);
         }
@@ -496,8 +503,8 @@ pub async fn probe_media(root: &Path, input: &str) -> Value {
 
     // ⚠️ 只用 `-i`、**不给输出文件**，也不加 `-f null -`。原因见上面那段
     //    「三个必须记住的坑」②：`-f null -` 会真的解码一遍，代价随时长线性增长。
-    let Some((_code, stderr)) = run_capture(&ffmpeg, &["-hide_banner", "-nostdin", "-i", input])
-        .await
+    let Some((_code, stderr)) =
+        run_capture(&ffmpeg, &["-hide_banner", "-nostdin", "-i", input]).await
     else {
         return json!({ "available": true, "probed": false, "note": "读取媒体信息失败" });
     };
@@ -871,9 +878,9 @@ mod tests {
     }
 
     /* ── 从 ffmpeg stderr 读媒体信息 ──────────────────────────────────
-       下面三段是**真实的** `ffmpeg -i` 输出（本机 n9.0.2 实测），原样粘进来。
-       ⚠️ 改这些夹具时要重新跑一遍真的 ffmpeg 再粘，别照记忆手写 —— 这些
-       函数的全部难点就是「真实的行长什么样」。 */
+    下面三段是**真实的** `ffmpeg -i` 输出（本机 n9.0.2 实测），原样粘进来。
+    ⚠️ 改这些夹具时要重新跑一遍真的 ffmpeg 再粘，别照记忆手写 —— 这些
+    函数的全部难点就是「真实的行长什么样」。 */
 
     const MP3_STDERR: &str = "\
 Input #0, mp3, from 'a.mp3':
@@ -1008,7 +1015,9 @@ At least one output file must be specified
     ///     VSS_FFMPEG=/usr/bin/ffmpeg cargo test --lib probe_media_on_a_real_file -- --nocapture
     #[tokio::test]
     async fn probe_media_on_a_real_file() {
-        let Ok(bin) = std::env::var("VSS_FFMPEG") else { return };
+        let Ok(bin) = std::env::var("VSS_FFMPEG") else {
+            return;
+        };
         let dir = std::env::temp_dir().join("vss-probe-e2e");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1016,18 +1025,39 @@ At least one output file must be specified
         // 造一个带音视频的 mp4。视频用内建的 `mpeg4` 而不是 `libx264`：
         // 随包那份 ffmpeg 是 LGPL 档（不带 x264），用 libx264 这条测试在真实产物上跑不了。
         let ok = tokio_command(Path::new(&bin))
-            .args(["-hide_banner","-y","-f","lavfi","-i","testsrc=duration=1:size=320x240:rate=25",
-                   "-f","lavfi","-i","sine=duration=1","-c:v","mpeg4","-c:a","aac","-shortest"])
-            .arg(&mp4).output().await.unwrap();
+            .args([
+                "-hide_banner",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=320x240:rate=25",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=1",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&mp4)
+            .output()
+            .await
+            .unwrap();
         assert!(ok.status.success());
         /* `probe_media` 收的是**程序根**，然后问产物表要 `tools/ffmpeg/bin/ffmpeg`。
-           所以这里照那个形状摆一份 —— 比靠 PATH 兜底更确定（CI 上 PATH 里有没有
-           ffmpeg 不由我们决定，而这条测试要测的是我们自己的组装逻辑）。 */
+        所以这里照那个形状摆一份 —— 比靠 PATH 兜底更确定（CI 上 PATH 里有没有
+        ffmpeg 不由我们决定，而这条测试要测的是我们自己的组装逻辑）。 */
         let tools = dir.join("tools").join("ffmpeg").join("bin");
         std::fs::create_dir_all(&tools).unwrap();
         std::fs::copy(&bin, tools.join("ffmpeg")).unwrap();
         let got = probe_media(&dir, &mp4.to_string_lossy()).await;
-        println!("probe_media → {}", serde_json::to_string_pretty(&got).unwrap());
+        println!(
+            "probe_media → {}",
+            serde_json::to_string_pretty(&got).unwrap()
+        );
         assert_eq!(got["probed"], json!(true));
         assert_eq!(got["audio"]["codec"], "aac");
         assert_eq!(got["audio"]["channels"], 1.0);
@@ -1037,8 +1067,8 @@ At least one output file must be specified
         assert!(got["sizeBytes"].as_f64().unwrap() > 1000.0);
 
         /* 读不出来的文件要给 `probed:false` + 一句 note（前端 `Audio.tsx` 与
-           `Midi.tsx` 都有对应分支）。⚠️ 这里同时钉住「**不是**靠退出码判」：
-           正常文件 ffmpeg 也返回 1，所以退出码在这条路上一无用处。 */
+        `Midi.tsx` 都有对应分支）。⚠️ 这里同时钉住「**不是**靠退出码判」：
+        正常文件 ffmpeg 也返回 1，所以退出码在这条路上一无用处。 */
         let bad = dir.join("bad.bin");
         std::fs::write(&bad, b"not a media file at all").unwrap();
         let failed = probe_media(&dir, &bad.to_string_lossy()).await;
@@ -1091,14 +1121,20 @@ At least one output file must be specified
         assert!(made.status.success(), "造测试音频失败");
 
         let input = "-i";
-        let Some((_code, text)) =
-            run_capture(bin, &["-hide_banner", "-nostdin", input, &mp3.to_string_lossy()]).await
+        let Some((_code, text)) = run_capture(
+            bin,
+            &["-hide_banner", "-nostdin", input, &mp3.to_string_lossy()],
+        )
+        .await
         else {
             panic!("收不到 ffmpeg 输出");
         };
         println!("{text}");
         // 判据本身（Input #）与几个关键字段
-        assert!(text.contains("Input #"), "判据「stderr 里有 Input #」失效了");
+        assert!(
+            text.contains("Input #"),
+            "判据「stderr 里有 Input #」失效了"
+        );
         let secs = duration_of(&text);
         assert!((secs - 1.0).abs() < 0.1, "时长不对：{secs}");
         assert_eq!(container_of(&text), "mp3");

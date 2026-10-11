@@ -14,12 +14,16 @@
 /// 打开 `HKCU\<subkey>` 读一个字符串值。读不到 / 类型不对都回 `None`。
 #[cfg(windows)]
 pub fn read_hkcu_string(subkey: &str, value: &str) -> Option<String> {
-    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, ERROR_MORE_DATA};
+    use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
         HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
     };
 
-    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let wide = |s: &str| {
+        s.encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
     let sub = wide(subkey);
     let name = wide(value);
 
@@ -32,7 +36,14 @@ pub fn read_hkcu_string(subkey: &str, value: &str) -> Option<String> {
         }
         let mut kind = 0u32;
         let mut len = 0u32; // 字节数，含结尾的 NUL
-        let status = RegQueryValueExW(key, name.as_ptr(), std::ptr::null(), &mut kind, std::ptr::null_mut(), &mut len);
+        let status = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            std::ptr::null_mut(),
+            &mut len,
+        );
         if status != ERROR_SUCCESS && status != ERROR_MORE_DATA {
             RegCloseKey(key);
             return None;
@@ -82,6 +93,9 @@ mod tests {
             None => eprintln!("跳过：HKCU 里没有这个键（本机没装 exe 版）"),
         }
         // 不存在的键必须回 None，而不是报错或回空串
-        assert_eq!(super::read_hkcu_string(r"Software\qingmu\nope-not-here", "x"), None);
+        assert_eq!(
+            super::read_hkcu_string(r"Software\qingmu\nope-not-here", "x"),
+            None
+        );
     }
 }

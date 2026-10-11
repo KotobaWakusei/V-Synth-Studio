@@ -1,7 +1,8 @@
-import {type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState} from 'react'
+import * as React from 'react'
+import {lazy, type ReactNode, Suspense, useCallback, useEffect, useRef, useState} from 'react'
 import {api, type UpdateCheck} from '@/lib/api'
 import {type AppConfig, getConfig, onConfigError, saveConfig, syncConfig} from '@/lib/config'
-import {useI18n, type UiLanguage, setUiLanguage} from '@/lib/i18n'
+import {setUiLanguage, type UiLanguage, useI18n} from '@/lib/i18n'
 import type {AppState} from '@/lib/types'
 import {Icon, type IconName} from '@/components/Icon'
 import {GlassPanel, Panel} from '@/components/Panel'
@@ -286,7 +287,8 @@ export default function App() {
                                 <span className="lg-selection-lens nav-lens" ref={lensRef} aria-hidden="true"/>
                                 {PAGES.map((p, i) => (
                                     <div key={p.id}>
-                                        {p.group !== PAGES[i - 1]?.group && <div className="nav-group">{t(p.group)}</div>}
+                                        {p.group !== PAGES[i - 1]?.group &&
+                                            <div className="nav-group">{t(p.group)}</div>}
                                         <button
                                             type="button"
                                             className="nav-row"
@@ -436,7 +438,11 @@ function PageSkeleton() {
  * 它在侧栏那块玻璃**里面** —— 库的规矩是「不要玻璃叠玻璃」（放玻璃上的元素用填充和
  * 透明度，不再叠一层）。
  */
-function ThemeSwitch({value, onChange, t}: { value: ThemeMode; onChange: (m: ThemeMode) => void; t: (text: string) => string }) {
+function ThemeSwitch({value, onChange, t}: {
+    value: ThemeMode;
+    onChange: (m: ThemeMode) => void;
+    t: (text: string) => string
+}) {
     const labels: Record<ThemeMode, string> = {system: t('跟随系统'), light: t('明亮'), dark: t('黑暗')}
     const order: ThemeMode[] = ['system', 'light', 'dark']
     return (

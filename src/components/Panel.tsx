@@ -171,7 +171,7 @@ export function Chip({
  * 一根进度条。`pct` 传 `null` = 拿不到分母（chunked 下载没有 Content-Length），
  * 那就让它来回扫，别画一根假装 0% 的空条。
  */
-export function ProgressBar({pct}: {pct: number | null}) {
+export function ProgressBar({pct}: { pct: number | null }) {
     const known = pct !== null
     return (
         <div

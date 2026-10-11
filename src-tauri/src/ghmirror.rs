@@ -145,7 +145,7 @@ async fn fetch_list() -> Option<Vec<Mirror>> {
         }
         let base = m.get("base").and_then(Value::as_str).unwrap_or("").trim();
         /* 只认 https 的绝对地址：名单是外部数据，拼进 URL 之前先卡一道，
-           免得 `file://` 之类的形状被原样拿去取字节。 */
+        免得 `file://` 之类的形状被原样拿去取字节。 */
         if !base.starts_with("https://") {
             continue;
         }
@@ -178,7 +178,11 @@ impl Ranked {
     /// 换下一面。**轮完一圈回到第一个**：失败未必是镜像的错（磁盘满、拔网线），
     /// 一路沿排名往下走只会越走越差。
     fn advance(&mut self) {
-        self.idx = if self.idx + 1 < self.urls.len() { self.idx + 1 } else { 0 };
+        self.idx = if self.idx + 1 < self.urls.len() {
+            self.idx + 1
+        } else {
+            0
+        };
     }
 
     fn current(&self) -> Option<&String> {
@@ -204,11 +208,11 @@ pub async fn pick(canonical: &str) -> String {
     let mirrors = mirror_list().await;
     let mut urls = probe_all(canonical, &mirrors).await;
     /* 官方那条**永远垫在最后**：镜像全不通（名单过期、公司网只放行 github.com）
-       时它还有机会，而它失败时报出来的也是 github.com 的错，不是某个野镜像的。 */
+    时它还有机会，而它失败时报出来的也是 github.com 的错，不是某个野镜像的。 */
     urls.push(canonical.to_string());
     /* 记一行日志：用户报「下不动」时，第一件要问清的就是「走的哪一面」——
-       界面上没有这一格，而那一步已经过去了。只在**重新挑**的时候记（缓存命中不记），
-       否则每下一卷都刷一行。 */
+    界面上没有这一格，而那一步已经过去了。只在**重新挑**的时候记（缓存命中不记），
+    否则每下一卷都刷一行。 */
     if let Some(first) = urls.first().filter(|u| *u != canonical) {
         crate::log_line(&format!("镜像加速：{canonical} → {first}"));
     }
@@ -346,8 +350,8 @@ async fn probe_one(client: &reqwest::Client, url: &str) -> Option<Measured> {
     }
 
     /* 读满一个**固定窗口**（或收够 PROBE_MAX_BYTES 就提前收工）：拿到多少字节就是多少。
-       ⚠️ 别改成「读完整个 body」：不认 Range 的镜像会回一整个 966 MB，那样挑一面镜子
-       就要几分钟、白烧几 GB 流量。 */
+    ⚠️ 别改成「读完整个 body」：不认 Range 的镜像会回一整个 966 MB，那样挑一面镜子
+    就要几分钟、白烧几 GB 流量。 */
     let deadline = Instant::now() + PROBE_WINDOW;
     let mut bytes: u64 = 0;
     let mut stream = res.bytes_stream();
@@ -442,7 +446,9 @@ mod tests {
     /// 都是直连更快，套上代理反而要多一跳。
     #[test]
     fn only_github_com_is_mirrorable() {
-        assert!(mirrorable("https://github.com/a/b/releases/download/t/x.zip"));
+        assert!(mirrorable(
+            "https://github.com/a/b/releases/download/t/x.zip"
+        ));
         assert!(!mirrorable("https://api.github.com/repos/a/b/releases"));
         assert!(!mirrorable("https://objects.githubusercontent.com/x"));
         assert!(
@@ -539,7 +545,9 @@ mod tests {
             "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
              Content-Length: 4\r\nConnection: close\r\n\r\nPK\x03\x04",
         );
-        let m = probe_one(crate::net::client(), &ranged).await.expect("这面该能用");
+        let m = probe_one(crate::net::client(), &ranged)
+            .await
+            .expect("这面该能用");
         assert!(m.ranged, "回了 206 就该记成「认 Range」");
 
         // 二进制、不认 Range（回 200 一整份）：还能下，但只能当次选
@@ -547,7 +555,9 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\
              Content-Length: 4\r\nConnection: close\r\n\r\nPK\x03\x04",
         );
-        let m = probe_one(crate::net::client(), &plain).await.expect("这面还能下");
+        let m = probe_one(crate::net::client(), &plain)
+            .await
+            .expect("这面还能下");
         assert!(!m.ranged, "回 200 是不认 Range，要排到认 Range 的后面");
     }
 
@@ -583,7 +593,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "要联网实测镜像，按需手动跑"]
     async fn real_mirror_pick_ranks_live_mirrors() {
-        let url = "https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules/models.zip";
+        let url =
+            "https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules/models.zip";
         let list = mirror_list().await;
         println!("名单 {} 面，短名单实测 {PROBE_MAX} 面：", list.len());
         for u in probe_all(url, &list).await {

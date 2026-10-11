@@ -132,7 +132,7 @@ export function WallpaperLayer() {
         const onMsg = (ev: MessageEvent) => {
             const frame = frameRef.current
             if (!frame || ev.source !== frame.contentWindow) return
-            const d = (ev.data ?? {}) as {type?: string; message?: string}
+            const d = (ev.data ?? {}) as { type?: string; message?: string }
             if (d.type === 'boot') {
                 void feedScene(sceneRef.current)
                 return
@@ -236,7 +236,7 @@ export function WallpaperLayer() {
                                     const err = el.error
                                     fail(
                                         `视频解不了（MediaError ${err?.code ?? '?'}）：` +
-                                            '这个编码 WebView2 放不出来',
+                                        '这个编码 WebView2 放不出来',
                                     )
                                 }}
                             />
@@ -260,7 +260,7 @@ export function WallpaperLayer() {
  * ⚠️ 它是 `.wallpaper` 的**兄弟**而不是子节点：那一层是 `pointer-events: none`，
  * 放进去的话「知道了」点不动。所以这里单独 fixed 定位、自己开 `pointer-events`。
  */
-function WallpaperNotice({title, reason, onClose}: {title: string; reason: string; onClose: () => void}) {
+function WallpaperNotice({title, reason, onClose}: { title: string; reason: string; onClose: () => void }) {
     return (
         <div className="wallpaper-notice" role="status">
             <div className="wallpaper-notice-text">

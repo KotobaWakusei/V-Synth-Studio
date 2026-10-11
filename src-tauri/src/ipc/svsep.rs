@@ -323,7 +323,8 @@ pub async fn svsep_runtime_download(st: super::St<'_>) -> Cmd {
 /// 只 `create_dir_all` 不够：只读盘、受控文件夹都能把空目录建出来，
 /// 写第一个文件时才 Access Denied —— 而那已经是解压到一半之后了。
 fn writable_probe(dir: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败（{}）：{e}", dir.to_string_lossy()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("建目录失败（{}）：{e}", dir.to_string_lossy()))?;
     let probe = dir.join(".vss-write-probe");
     std::fs::write(&probe, b"ok")
         .map_err(|e| format!("这个目录写不进去（{}）：{e}", dir.to_string_lossy()))?;
@@ -391,7 +392,7 @@ pub async fn ext_dir_set(st_: super::St<'_>, dir: String) -> Cmd {
     };
     map.insert("extDir".to_string(), json!(raw));
     /* ⚠️ `svsepRuntimeDir` 一并落到同一个值：它是老键，启动时**优先于** `extDir`
-       （见 `AppState::new`），留着旧值会让「刚换的目录」下次启动又跳回去。 */
+    （见 `AppState::new`），留着旧值会让「刚换的目录」下次启动又跳回去。 */
     map.insert("svsepRuntimeDir".to_string(), json!(raw));
     super::config_file::save_config(&st_.writable, &cfg)
         .map_err(|e| format!("保存配置失败：{e}"))?;
@@ -401,7 +402,7 @@ pub async fn ext_dir_set(st_: super::St<'_>, dir: String) -> Cmd {
     crate::artifact::init_ext_base(&raw);
     let active = ext_dir(st_.inner());
     /* ⚠️ 扩展包目录一换，`svsep/` 下面就没有随包分发的 `backend/` 与 `bin/` 了
-       （它们不随 zip 下载），所以这里立刻补一份过去。 */
+    （它们不随 zip 下载），所以这里立刻补一份过去。 */
     let staged = crate::svsep::stage_runtime_assets(&st_.root.join("data").join("svsep"), &active);
     crate::log_line(&format!(
         "扩展包目录改成：{}（补进 {staged} 个随包文件）",
@@ -775,7 +776,7 @@ pub async fn svsep_inference_get(st: super::St<'_>) -> Cmd {
 #[tauri::command]
 pub async fn svsep_set_inference(st: super::St<'_>, mode: String) -> Cmd {
     /* 认不出的值在这里就回错，别悄悄当 `auto` —— 这条命令只有界面在调，收到怪值
-       说明前端或调用方写错了，静默兜底会把这种错藏起来。 */
+    说明前端或调用方写错了，静默兜底会把这种错藏起来。 */
     let raw = mode.trim().to_ascii_lowercase();
     if !["auto", "cpu", "gpu"].contains(&raw.as_str()) {
         return Err(format!("无效模式：{mode}（只能是 auto / cpu / gpu）"));
@@ -786,8 +787,8 @@ pub async fn svsep_set_inference(st: super::St<'_>, mode: String) -> Cmd {
     crate::svsep::apply_infer_mode(&ext);
 
     /* 选了 GPU 但加速包还没下（A 卡 / 核显）→ 顺手开始下：24 MB，界面上有现成的
-       进度条（`dl.kind == "dml"`）。N 卡不需要它（那份 CUDA 在运行时里）。
-       ⚠️ 失败不阻断：设置已经存下来了，下不动只是这次没生效。 */
+    进度条（`dl.kind == "dml"`）。N 卡不需要它（那份 CUDA 在运行时里）。
+    ⚠️ 失败不阻断：设置已经存下来了，下不动只是这次没生效。 */
     let mut dml_downloading = false;
     if mode == "gpu" && !crate::svsep::nvidia_present() && !crate::svsep::dml_installed(&ext) {
         dml_downloading = start_dml_download(st.inner()).is_ok();

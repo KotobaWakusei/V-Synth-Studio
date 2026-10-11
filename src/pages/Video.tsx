@@ -1,23 +1,16 @@
 import {useEffect, useMemo, useRef, useState} from 'react'
-import {
-    GlassCheckbox,
-    GlassSegmentedControl,
-    List,
-    ListRow,
-    ListSection,
-    Picker,
-} from '@ttqtt/liquid-glass-react'
+import {GlassCheckbox, GlassSegmentedControl, List, ListRow, ListSection, Picker,} from '@ttqtt/liquid-glass-react'
 import type {VideoInfo, VideoParse} from '@/lib/api'
 import {api} from '@/lib/api'
 import {
     codecOf,
     countItems,
     estimateSize,
+    type Item,
     itemList,
     lockedQualities,
     mbps,
     pickDefaults,
-    type Item,
     type Picked,
     renderSubDir,
     riskyCodec,
@@ -29,7 +22,7 @@ import {Credit, Upstream} from '@/components/Credit'
 import {DirectoryInput} from '@/components/DirPicker'
 import {Field, TextInput} from '@/components/Field'
 import {Icon} from '@/components/Icon'
-import {JobProgress, jobStatusText, jobStatusTone, type JobStatus} from '@/components/Job'
+import {JobProgress, type JobStatus, jobStatusText, jobStatusTone} from '@/components/Job'
 import {Chip, Finding, Panel, PanelHead, Stat} from '@/components/Panel'
 import {VideoPreview} from '@/components/Preview'
 import {ScanLogin} from '@/components/ScanLogin'

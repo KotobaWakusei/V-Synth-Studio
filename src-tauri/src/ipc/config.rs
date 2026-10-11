@@ -17,7 +17,7 @@ use super::Cmd;
 #[tauri::command]
 pub async fn get_config(st: super::St<'_>) -> Cmd {
     let cfg = st.config_snapshot();
-    Ok(serde_json::json!({ "config": super::config_file::mask_secrets(&cfg) }))
+    Ok(json!({ "config": super::config_file::mask_secrets(&cfg) }))
 }
 
 /// 盘上那份网易云 Cookie 若是脏的（带空白 / 换行），就地洗干净并落盘一次。
@@ -36,7 +36,7 @@ pub(crate) fn normalize_netease_cookie(cfg: &mut Value) -> bool {
         return false;
     }
     if let Some(map) = cfg.as_object_mut() {
-        map.insert("neteaseCookie".into(), serde_json::json!(clean));
+        map.insert("neteaseCookie".into(), json!(clean));
     }
     true
 }
@@ -55,14 +55,20 @@ mod tests {
         let mut cfg = json!({ "neteaseCookie": "MUSIC_U=abc;\n__csrf=def;\n", "theme": "dark" });
         assert!(normalize_netease_cookie(&mut cfg), "脏值该被洗掉");
         assert_eq!(cfg["neteaseCookie"], json!("MUSIC_U=abc; __csrf=def"));
-        assert!(!normalize_netease_cookie(&mut cfg), "洗过之后再读一次不该再改");
+        assert!(
+            !normalize_netease_cookie(&mut cfg),
+            "洗过之后再读一次不该再改"
+        );
 
         /* 没有分号、只有换行的那份**只能折成空格**：`MUSIC_U=abc\n__csrf=def` 无从判断
-           是「两对键值」还是「一个值里带空白」，猜错会把真值切坏。这条断言是给以后
-           想「顺手按换行再拆一次」的人看的：不许拆。 */
+        是「两对键值」还是「一个值里带空白」，猜错会把真值切坏。这条断言是给以后
+        想「顺手按换行再拆一次」的人看的：不许拆。 */
         let mut no_semicolon = json!({ "neteaseCookie": "MUSIC_U=abc\n__csrf=def" });
         assert!(normalize_netease_cookie(&mut no_semicolon));
-        assert_eq!(no_semicolon["neteaseCookie"], json!("MUSIC_U=abc __csrf=def"));
+        assert_eq!(
+            no_semicolon["neteaseCookie"],
+            json!("MUSIC_U=abc __csrf=def")
+        );
 
         // 干净的值（含空串）与「没有这个键」都不动
         let mut clean = json!({ "neteaseCookie": "MUSIC_U=abc" });
@@ -100,7 +106,7 @@ pub async fn migrate_legacy_settings(st: super::St<'_>, old: Value) -> Cmd {
         return Err("old 应该是一个对象".into());
     };
     if src.is_empty() {
-        return Ok(serde_json::json!({ "migrated": 0 }));
+        return Ok(json!({ "migrated": 0 }));
     }
 
     let mut cfg = st.config_snapshot();
@@ -131,7 +137,7 @@ pub async fn migrate_legacy_settings(st: super::St<'_>, old: Value) -> Cmd {
         }
         crate::log_line(&format!("已从旧前端的 localStorage 迁来 {migrated} 项设置"));
     }
-    Ok(serde_json::json!({ "migrated": migrated }))
+    Ok(json!({ "migrated": migrated }))
 }
 
 /// localStorage 键 → 配置键。
@@ -174,10 +180,7 @@ fn set_config_inner(st: &super::AppState, patch: Value) -> Result<Value, String>
     // Without this, two concurrent set_config calls can both read the same old
     // snapshot, save different patches, and let the later disk write silently
     // erase the earlier change.
-    let mut guard = st
-        .config
-        .lock()
-        .map_err(|_| "配置锁坏了".to_string())?;
+    let mut guard = st.config.lock().map_err(|_| "配置锁坏了".to_string())?;
     let mut cfg = guard.clone();
     if let (Some(dst), Some(src)) = (cfg.as_object_mut(), patch.as_object()) {
         for (k, v) in src {
@@ -185,8 +188,8 @@ fn set_config_inner(st: &super::AppState, patch: Value) -> Result<Value, String>
                 continue;
             }
             /* 网易云的 Cookie 一律先清洗再落盘：粘贴带进来的换行 / 制表符会让 `Cookie`
-               请求头发不出去，而界面上只显示「已设置」——脏值存进去就再也看不出问题。
-               清洗不出来（不是键值对）时**报错而不是存**，见 `lyrics::clean_cookie`。 */
+            请求头发不出去，而界面上只显示「已设置」——脏值存进去就再也看不出问题。
+            清洗不出来（不是键值对）时**报错而不是存**，见 `lyrics::clean_cookie`。 */
             if k == "neteaseCookie" {
                 let raw = v.as_str().unwrap_or("");
                 dst.insert(k.clone(), json!(crate::lyrics::clean_cookie(raw)?));
@@ -201,5 +204,5 @@ fn set_config_inner(st: &super::AppState, patch: Value) -> Result<Value, String>
     *guard = cfg.clone();
 
     // 回显也要打码：不然刚保存完 Cookie，明文就从响应里漏回前端了
-    Ok(serde_json::json!({ "config": super::config_file::mask_secrets(&cfg) }))
+    Ok(json!({ "config": super::config_file::mask_secrets(&cfg) }))
 }

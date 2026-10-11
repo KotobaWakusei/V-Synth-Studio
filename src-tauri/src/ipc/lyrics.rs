@@ -64,7 +64,9 @@ fn file_name(body: &Value, ext: &str, fallback: &str) -> String {
         .trim();
     // 表里歌词与音频两类都要有：用户在「文件名」里手打 `.flac` 的情况比想象中多，
     // 漏一个就会存成 `歌.flac.mp3`。比较时不分大小写，省掉 `.MP3` 那种重复项。
-    const KNOWN_EXT: [&str; 9] = ["lrc", "srt", "ass", "txt", "mp3", "flac", "m4a", "aac", "wav"];
+    const KNOWN_EXT: [&str; 9] = [
+        "lrc", "srt", "ass", "txt", "mp3", "flac", "m4a", "aac", "wav",
+    ];
     let stem = match raw.rsplit_once('.') {
         Some((head, tail)) if KNOWN_EXT.iter().any(|e| e.eq_ignore_ascii_case(tail)) => head,
         _ => raw,
@@ -289,9 +291,8 @@ pub async fn lyrics_song(st: super::St<'_>, args: Value) -> Cmd {
         return Err("没有输出目录，请先选择目录".into());
     }
 
-    let quality = crate::lyrics::Quality::parse(
-        args.get("quality").and_then(|v| v.as_str()).unwrap_or(""),
-    );
+    let quality =
+        crate::lyrics::Quality::parse(args.get("quality").and_then(|v| v.as_str()).unwrap_or(""));
     // 曲目时长用来拦「只拿到 30 秒试听片段」；前端拿不到就是 0，此时不判
     let duration = args
         .get("durationSec")

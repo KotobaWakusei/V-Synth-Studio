@@ -19,12 +19,12 @@ import {useState} from 'react'
 import {GlassSegmentedControl} from '@ttqtt/liquid-glass-react'
 
 import {Button} from '@/components/Button'
-import {Panel, PanelHead, Finding} from '@/components/Panel'
+import {Finding, Panel, PanelHead} from '@/components/Panel'
 import {SwitchRow} from '@/components/SwitchRow'
 import {getConfig, saveConfig} from '@/lib/config'
 import {useI18n} from '@/lib/i18n'
 import {useWeScan, type WeItem} from '@/lib/wallpaper'
-import {capOk, type AppState} from '@/lib/types'
+import {type AppState, capOk} from '@/lib/types'
 import type {ToastFn} from '@/pages/types'
 
 import './WallpaperSettings.css'
@@ -47,7 +47,7 @@ const TYPE_LABEL: Record<string, string> = {
 /** 这几类现在画不出来（会退到预览图），界面上标一下。 */
 const TYPE_UNSUPPORTED = new Set(['web', 'application'])
 
-export function Wallpaper({onToast, state}: {onToast: ToastFn; state: AppState | null}) {
+export function Wallpaper({onToast, state}: { onToast: ToastFn; state: AppState | null }) {
     const {t} = useI18n()
     const {scan, error, busy, reload} = useWeScan()
     const [sel, setSel] = useState(() => String(getConfig()['wallpaper'] ?? ''))

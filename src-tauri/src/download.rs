@@ -306,7 +306,11 @@ pub fn file_size(p: &Path) -> u64 {
 /// 把 `req.url` 下到 `req.part`。**全仓唯一的下载实现。**
 ///
 /// 返回的 [`Outcome`] 说清是下完了、暂停了还是取消了；真失败是 `Err`。
-pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> Result<Outcome, String> {
+pub async fn download(
+    req: &Request<'_>,
+    ctl: &Control<'_>,
+    note: Note<'_>,
+) -> Result<Outcome, String> {
     if !req.url.starts_with("https://") && !req.url.starts_with("http://") {
         return Err(format!("下载地址必须是 http(s) 链接：{}", req.url));
     }
@@ -338,8 +342,8 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
     }
 
     /* 真正从哪儿取字节 —— 镜像加速（`ghmirror`）。`req.url` 始终是**规范链接**，
-       `.part.url` 记号记的也是它，所以换镜像不会让几个 GB 的续传点作废。
-       非 GitHub 链接原样返回，一个额外的请求都不发。 */
+    `.part.url` 记号记的也是它，所以换镜像不会让几个 GB 的续传点作废。
+    非 GitHub 链接原样返回，一个额外的请求都不发。 */
     let mut fetch = crate::ghmirror::pick(req.url).await;
 
     // ── 总长与分段能力 ──
@@ -353,9 +357,9 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
     }
 
     /* 分块只在「从头下、够大、够多线程、且服务端认 Range」时才用。
-       ⚠️ 续传中不用分块：分块要先把文件撑到最终大小再各写各的偏移，而续传的
-       起点在文件中间，两者放一起就要为每个块单独算「还缺哪一段」，复杂度和
-       出错面都不值。单流续传是几十年验证过的做法。 */
+    ⚠️ 续传中不用分块：分块要先把文件撑到最终大小再各写各的偏移，而续传的
+    起点在文件中间，两者放一起就要为每个块单独算「还缺哪一段」，复杂度和
+    出错面都不值。单流续传是几十年验证过的做法。 */
     let chunked = accept_ranges
         && start == 0
         && req.shape.threads() > 1
@@ -372,10 +376,10 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
         }
         if rounds > 1 {
             /* 上一轮失败了 → 换一面镜像再来。规范链接没变，所以盘上的续传点还算数
-               （`.part.url` 记的是它，不是镜像地址）。
-               ⚠️ **只在失败之后换**：排名是开工前实测出来的，每轮都重测等于把吞吐
-               反复押在刚测出来的那条线路上，而换个镜像并不需要重测（`ghmirror`
-               记着整张名次表）。 */
+            （`.part.url` 记的是它，不是镜像地址）。
+            ⚠️ **只在失败之后换**：排名是开工前实测出来的，每轮都重测等于把吞吐
+            反复押在刚测出来的那条线路上，而换个镜像并不需要重测（`ghmirror`
+            记着整张名次表）。 */
             crate::ghmirror::discard(req.url);
             fetch = crate::ghmirror::pick(req.url).await;
         }
@@ -388,28 +392,27 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
                 // 用户让它停 → 不要退化成单流再跑一遍
                 Err(e) if e == STOPPED => Err(e),
                 /* ⚠️ 分块失败就退回单流（原样保留的行为）。
-                   注意这里**不能**把 `part` 删掉：分块已经写了那么多，单流从头
-                   覆盖同一个文件是安全的（`File::create` 会截断），删了反而多一次
-                   系统调用。 */
+                注意这里**不能**把 `part` 删掉：分块已经写了那么多，单流从头
+                覆盖同一个文件是安全的（`File::create` 会截断），删了反而多一次
+                系统调用。 */
                 Err(chunk_err) => {
                     /* ⚠️ 退回单流**不保证**能成（服务端可能连单流都拒）。
-                       两边的错都留着：单流失败时把「分块为什么没成」也带上，
-                       否则用户只看到最后那一句，排查时看不出真正的起因。 */
+                    两边的错都留着：单流失败时把「分块为什么没成」也带上，
+                    否则用户只看到最后那一句，排查时看不出真正的起因。 */
                     note(0, total, Stage::Download);
                     match download_stream(&fetch, req, &header_map, 0, &mut total, &tracker, ctl)
                         .await
                     {
                         Ok(()) => Ok(tracker.received()),
                         Err(stream_err) if stream_err == STOPPED => Err(stream_err),
-                        Err(stream_err) => {
-                            Err(format!("（分块先失败：{chunk_err}）{stream_err}"))
-                        }
+                        Err(stream_err) => Err(format!("（分块先失败：{chunk_err}）{stream_err}")),
                     }
                 }
             }
         } else {
             let tracker = Tracker::new(total, note);
-            match download_stream(&fetch, req, &header_map, start, &mut total, &tracker, ctl).await {
+            match download_stream(&fetch, req, &header_map, start, &mut total, &tracker, ctl).await
+            {
                 Ok(()) => Ok(tracker.received()),
                 Err(e) => Err(e),
             }
@@ -418,7 +421,9 @@ pub async fn download(req: &Request<'_>, ctl: &Control<'_>, note: Note<'_>) -> R
         // 下完之后核对字节数（`expect`）—— 对不上当成这一轮失败
         let attempt = match attempt {
             Ok(bytes) => match req.expect {
-                Some(want) if bytes != want => Err(format!("下到的文件是 {bytes} 字节，应是 {want} 字节")),
+                Some(want) if bytes != want => {
+                    Err(format!("下到的文件是 {bytes} 字节，应是 {want} 字节"))
+                }
                 _ => Ok(bytes),
             },
             Err(e) => Err(e),
@@ -549,16 +554,19 @@ async fn download_stream(
             HeaderValue::from_str(&format!("bytes={start}-")).map_err(|e| e.to_string())?,
         );
     }
-    let res = req.client.get(fetch).headers(h)
+    let res = req
+        .client
+        .get(fetch)
+        .headers(h)
         .send()
         .await
         .map_err(|e| format!("{}失败：{}", what(req.label), friendly(&e)))?;
     let status = res.status().as_u16();
     /* 416 = 服务端说「这个区间不存在」：`start` 已经不小于整个文件了，也就是盘上
-       那一份**已经下全**（续传时对着一整卷再要一次就是这个症状）。分卷下载全靠
-       这一条：卷是按顺序下的，中间停一次之后前面那几卷都是一整份。
-       ⚠️ 只有 `Resumable` 能这么读 —— 它写的是「同一条链接的追加流」，`start`
-       就是盘上已有的字节数；`Plain` 不续传，416 只能是真的出错。 */
+    那一份**已经下全**（续传时对着一整卷再要一次就是这个症状）。分卷下载全靠
+    这一条：卷是按顺序下的，中间停一次之后前面那几卷都是一整份。
+    ⚠️ 只有 `Resumable` 能这么读 —— 它写的是「同一条链接的追加流」，`start`
+    就是盘上已有的字节数；`Plain` 不续传，416 只能是真的出错。 */
     if status == 416 && start > 0 && req.shape.resumable() {
         tracker.reset(start);
         tracker.tick(start, *total);
@@ -566,7 +574,7 @@ async fn download_stream(
     }
     if !(200..300).contains(&status) {
         /* ⚠️ 带上真正用的那个地址：走镜像时一句「HTTP 404」分不出是这一面镜像挂了、
-           还是发布点上真没这个文件 —— 而这两件事的处置完全不同。 */
+        还是发布点上真没这个文件 —— 而这两件事的处置完全不同。 */
         return Err(format!("{}失败：HTTP {status}（{fetch}）", what(req.label)));
     }
     // 206 = 服务端认了 Range；200 = 不认，要从头写
@@ -584,7 +592,7 @@ async fn download_stream(
             .map_err(|e| format!("打开临时文件失败：{e}"))?
     } else {
         /* ⚠️ `create` 会把已有的半个包**截断** —— 服务端不认 Range 时这是对的：
-           追加会拼出「旧包前半段 + 新包后半段」的坏文件，要到解压才炸。 */
+        追加会拼出「旧包前半段 + 新包后半段」的坏文件，要到解压才炸。 */
         std::fs::File::create(req.part).map_err(|e| format!("写临时文件失败：{e}"))?
     };
     tracker.reset(written);
@@ -685,7 +693,10 @@ async fn download_range_once(
         reqwest::header::RANGE,
         HeaderValue::from_str(&format!("bytes={start}-{end}")).map_err(|e| e.to_string())?,
     );
-    let res = req.client.get(fetch).headers(h)
+    let res = req
+        .client
+        .get(fetch)
+        .headers(h)
         .send()
         .await
         .map_err(|e| friendly(&e))?;
@@ -735,7 +746,10 @@ pub async fn probe(
     client: &reqwest::Client,
 ) -> Result<(u64, bool), String> {
     let mut h = hdrs.clone();
-    h.insert(reqwest::header::RANGE, HeaderValue::from_static("bytes=0-0"));
+    h.insert(
+        reqwest::header::RANGE,
+        HeaderValue::from_static("bytes=0-0"),
+    );
     let res = client
         .get(url)
         .headers(h)
@@ -844,7 +858,11 @@ mod tests {
                     Some((a, b)) => ("206 Partial Content", a.min(total), b.min(total - 1)),
                     None => ("200 OK", 0, total.saturating_sub(1)),
                 };
-                let body = if total == 0 { &[][..] } else { &payload[from..=to] };
+                let body = if total == 0 {
+                    &[][..]
+                } else {
+                    &payload[from..=to]
+                };
                 let mut resp = format!(
                     "HTTP/1.1 {code}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\
                      Connection: close\r\n",
@@ -942,7 +960,12 @@ mod tests {
             expect: None,
         };
         let out = download(&req, &no_stop(), &|_, _, _| {}).await.unwrap();
-        assert_eq!(out, Outcome::Done { bytes: payload.len() as u64 });
+        assert_eq!(
+            out,
+            Outcome::Done {
+                bytes: payload.len() as u64
+            }
+        );
         assert_eq!(std::fs::read(&part).unwrap(), payload);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -958,9 +981,9 @@ mod tests {
         let part = dir.join("half.bin");
 
         /* ⚠️ 别用一个「端口没人听」的地址来测这条：引擎在开工前就把旧字节删了
-           （`Plain` 的清理），断言「文件不在」自然成立 —— 那证明的是「开工前
-           清理」，不是「失败后清理」。要测后者，必须让引擎**先真写进去半个文件、
-           再失败**，所以用 `half_then_break`。 */
+        （`Plain` 的清理），断言「文件不在」自然成立 —— 那证明的是「开工前
+        清理」，不是「失败后清理」。要测后者，必须让引擎**先真写进去半个文件、
+        再失败**，所以用 `half_then_break`。 */
         let payload = vec![0x5Au8; 200_000];
         let url = half_then_break(payload);
         let req = Request {
@@ -1004,7 +1027,10 @@ mod tests {
             expect: None,
         };
         let _ = download(&req, &no_stop(), &|_, _, _| {}).await.unwrap_err();
-        assert!(part.exists(), "Resumable 失败后把续传点删了（下次得从头下）");
+        assert!(
+            part.exists(),
+            "Resumable 失败后把续传点删了（下次得从头下）"
+        );
         assert!(
             file_size(&part) > 0,
             "留着的是个空文件 —— 那下次续传等于从头下，白留"
@@ -1031,14 +1057,21 @@ mod tests {
 
         // 暂停：check 立着、is_cancel 不立 → Paused，文件留着
         std::fs::write(&part, b"kept").unwrap();
-        let paused = download(&base, &Control::new(|| true, || false), &|_, _, _| {}).await.unwrap();
-        assert!(matches!(paused, Outcome::Paused { .. }), "该是暂停：{paused:?}");
+        let paused = download(&base, &Control::new(|| true, || false), &|_, _, _| {})
+            .await
+            .unwrap();
+        assert!(
+            matches!(paused, Outcome::Paused { .. }),
+            "该是暂停：{paused:?}"
+        );
         assert!(part.exists(), "暂停后该留着续传点");
 
         // 取消：两个都立 → Cancelled，文件及记号都删
         std::fs::write(&part, b"dropped").unwrap();
         write_url_marker(&part, &url).unwrap();
-        let gone = download(&base, &Control::new(|| true, || true), &|_, _, _| {}).await.unwrap();
+        let gone = download(&base, &Control::new(|| true, || true), &|_, _, _| {})
+            .await
+            .unwrap();
         assert_eq!(gone, Outcome::Cancelled);
         assert!(!part.exists(), "取消后该把续传点删掉");
         assert!(!url_marker(&part).exists(), "取消后该把记号也删掉");
@@ -1063,7 +1096,9 @@ mod tests {
                 let _ = s.read(&mut buf);
                 h2.fetch_add(1, Ordering::Relaxed);
                 // 一律 500，逼它重试到放弃
-                let _ = s.write_all(b"HTTP/1.1 500 Oops\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = s.write_all(
+                    b"HTTP/1.1 500 Oops\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
                 let _ = s.flush();
             }
         });
@@ -1077,7 +1112,10 @@ mod tests {
             headers: &[],
             shape: Shape::Plain,
             client: default_client(),
-            retry: Retry { rounds: 2, wait: Duration::from_millis(10) },
+            retry: Retry {
+                rounds: 2,
+                wait: Duration::from_millis(10),
+            },
             expect: None,
         };
         let err = download(&req, &no_stop(), &|_, _, _| {}).await.unwrap_err();
@@ -1140,7 +1178,10 @@ mod tests {
             headers: &[],
             shape: Shape::Plain,
             client: default_client(),
-            retry: Retry { rounds: 1, wait: Duration::from_millis(10) },
+            retry: Retry {
+                rounds: 1,
+                wait: Duration::from_millis(10),
+            },
             expect: Some(200),
         };
         let err = download(&req, &no_stop(), &|_, _, _| {}).await.unwrap_err();
@@ -1170,7 +1211,12 @@ mod tests {
             expect: Some(payload.len() as u64),
         };
         let out = download(&req, &no_stop(), &|_, _, _| {}).await.unwrap();
-        assert_eq!(out, Outcome::Done { bytes: payload.len() as u64 });
+        assert_eq!(
+            out,
+            Outcome::Done {
+                bytes: payload.len() as u64
+            }
+        );
         assert_eq!(std::fs::read(&part).unwrap(), payload);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1222,11 +1268,19 @@ Connection: close
             headers: &[],
             shape: Shape::Plain,
             client: default_client(),
-            retry: Retry { rounds: 3, wait: Duration::from_millis(10) },
+            retry: Retry {
+                rounds: 3,
+                wait: Duration::from_millis(10),
+            },
             expect: Some(good.len() as u64),
         };
         let out = download(&req, &no_stop(), &|_, _, _| {}).await.unwrap();
-        assert_eq!(out, Outcome::Done { bytes: good.len() as u64 });
+        assert_eq!(
+            out,
+            Outcome::Done {
+                bytes: good.len() as u64
+            }
+        );
         assert_eq!(
             std::fs::read(&part).unwrap(),
             good,
@@ -1241,7 +1295,10 @@ Connection: close
     fn shape_derives_probe_and_threads() {
         assert!(!Shape::Plain.probe());
         assert!(!Shape::Resumable.probe());
-        assert!(Shape::Parallel { threads: 4 }.probe(), "分块必须先 probe 才知道切几块");
+        assert!(
+            Shape::Parallel { threads: 4 }.probe(),
+            "分块必须先 probe 才知道切几块"
+        );
 
         assert_eq!(Shape::Plain.threads(), 1);
         assert_eq!(Shape::Resumable.threads(), 1, "续传不分块，线程数无意义");
@@ -1251,7 +1308,10 @@ Connection: close
 
         assert!(!Shape::Plain.resumable());
         assert!(Shape::Resumable.resumable());
-        assert!(!Shape::Parallel { threads: 4 }.resumable(), "分块与续传互斥");
+        assert!(
+            !Shape::Parallel { threads: 4 }.resumable(),
+            "分块与续传互斥"
+        );
     }
 
     /// `.part.url` 记号的判定：写着本链接才认；缺记号算「可以续」。
@@ -1263,7 +1323,10 @@ Connection: close
         assert!(!stored_resume(&part, "u"), "文件都不在，没什么可续的");
 
         std::fs::write(&part, b"abc").unwrap();
-        assert!(stored_resume(&part, "u"), "缺记号算可以续（旧版本留下的 .part）");
+        assert!(
+            stored_resume(&part, "u"),
+            "缺记号算可以续（旧版本留下的 .part）"
+        );
 
         write_url_marker(&part, "u").unwrap();
         assert!(stored_resume(&part, "u"), "记号写着同一条链接，当然认");
@@ -1318,7 +1381,10 @@ Connection: close
     #[tokio::test]
     async fn cancel_wins_from_pause_when_both_flags_are_up() {
         static BOTH: AtomicBool = AtomicBool::new(true);
-        let ctl = Control::new(|| BOTH.load(Ordering::Relaxed), || BOTH.load(Ordering::Relaxed));
+        let ctl = Control::new(
+            || BOTH.load(Ordering::Relaxed),
+            || BOTH.load(Ordering::Relaxed),
+        );
         let dir = tmp("both");
         let part = dir.join("b.part");
         std::fs::write(&part, b"x").unwrap();
@@ -1349,7 +1415,7 @@ Connection: close
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let hits = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let hits = std::sync::Arc::new(AtomicU64::new(0));
         let hits2 = hits.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming() {
@@ -1387,7 +1453,11 @@ Connection: close
             Outcome::Done { bytes: 1000 },
             "盘上那一卷已经下全了，416 该被当成「下完了」"
         );
-        assert_eq!(std::fs::metadata(&part).unwrap().len(), 1000, "416 不该往文件里写东西");
+        assert_eq!(
+            std::fs::metadata(&part).unwrap().len(),
+            1000,
+            "416 不该往文件里写东西"
+        );
         assert_eq!(
             hits.load(Ordering::Relaxed),
             1,

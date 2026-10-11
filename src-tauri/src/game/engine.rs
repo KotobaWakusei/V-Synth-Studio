@@ -158,7 +158,9 @@ fn build_sessions(
         return Ok((a, b, c, "CUDA"));
     }
     if let Some(why) = why {
-        crate::log_line(&format!("人声转 MIDI：CUDA 建会话失败，这一首改用 CPU —— {why}"));
+        crate::log_line(&format!(
+            "人声转 MIDI：CUDA 建会话失败，这一首改用 CPU —— {why}"
+        ));
     }
     Ok((
         ort_session(&enc, "encoder", threads, false)?,
@@ -193,7 +195,8 @@ pub fn transcribe(
     load_runtime(dll)?;
 
     progress("正在载入模型…", 0.0);
-    let (mut enc, mut seg, mut est, backend) = build_sessions(models_dir, opts.threads, opts.device)?;
+    let (mut enc, mut seg, mut est, backend) =
+        build_sessions(models_dir, opts.threads, opts.device)?;
 
     // 官方导出的图里随机数节点是图内自带的（`RandomUniformLike`），但验证用的
     // 注入版把它改成了名为 `rnd` 的图输入。两种都要能跑：有 `rnd` 就自己抽随机
@@ -509,10 +512,10 @@ mod tests {
     }
 
     /* ── 只解 `.onnx` 里我们要的那两个字段 ─────────────────────────────
-       ONNX 是 protobuf，而这条测试要的东西只有两样：某个初始化张量的名字与形状。
-       引一个 protobuf 生成器只为这个不值得（`build.rs` 要跟着吃一份 .proto），
-       所以这里按线格式手解 —— 与 `midi_transcribe` 里那条 `mini_onnx_is_a_well_formed_model`
-       同一套写法。 */
+    ONNX 是 protobuf，而这条测试要的东西只有两样：某个初始化张量的名字与形状。
+    引一个 protobuf 生成器只为这个不值得（`build.rs` 要跟着吃一份 .proto），
+    所以这里按线格式手解 —— 与 `midi_transcribe` 里那条 `mini_onnx_is_a_well_formed_model`
+    同一套写法。 */
 
     /// 解一个 varint，返回 `(值, 吃掉几个字节)`。
     fn take_varint(b: &[u8], i: usize) -> Option<(u64, usize)> {
@@ -664,7 +667,10 @@ mod tests {
         let bytes = std::fs::read(dir.join("encoder.onnx")).expect("读 encoder.onnx 失败");
         let frames = rope_frames_from(&bytes).expect("图里没有 rope.pe_cos 初始化张量");
         let allowed = (algo::MAX_ENCODER_SAMPLES / 441) as u64;
-        println!("rope 表 {frames} 帧；MAX_ENCODER_SAMPLES={} ⇒ {allowed} 帧", algo::MAX_ENCODER_SAMPLES);
+        println!(
+            "rope 表 {frames} 帧；MAX_ENCODER_SAMPLES={} ⇒ {allowed} 帧",
+            algo::MAX_ENCODER_SAMPLES
+        );
         assert!(
             allowed <= frames,
             "上限 {allowed} 帧超过了图里 rope 表的 {frames} 帧：长音频会死在 Mul 节点上"
@@ -703,7 +709,9 @@ mod tests {
 
         // 3 分钟、每帧都高于 -40 dB 的正弦：切片器判定「整段没有静音」，会原样交给 encoder
         let sr = algo::SAMPLE_RATE as usize;
-        let wave: Vec<f32> = (0..sr * 180).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let wave: Vec<f32> = (0..sr * 180)
+            .map(|i| (i as f32 * 0.05).sin() * 0.5)
+            .collect();
         let opts = Options {
             // 1 步就够：这里验的是 encoder 的形状，不是 D3PM 的采样质量
             steps: 1,

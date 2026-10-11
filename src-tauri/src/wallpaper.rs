@@ -57,7 +57,9 @@ fn library_roots(steam: &Path) -> Vec<PathBuf> {
         let Some(rest) = line.trim().strip_prefix("\"path\"") else {
             continue;
         };
-        let Some(start) = rest.find('"') else { continue };
+        let Some(start) = rest.find('"') else {
+            continue;
+        };
         let rest = &rest[start + 1..];
         let Some(end) = rest.find('"') else { continue };
         let p = PathBuf::from(rest[..end].replace("\\\\", "\\"));
@@ -91,10 +93,10 @@ fn current_wallpaper_file(we: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(we.join("config.json")).ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
     /* ⚠️ 顶层按 **Windows 账户名** 分节（那一段的键就是用户名），所以只能扫过去找
-       「哪一节里有 general」—— 写死用户名或者取第一个节都不行。
-       ⚠️ 真正的位置是 `general.wallpaperconfig.selectedwallpapers`（少一层就永远读不到，
-       而它**不报错**：症状只是「跟随当前壁纸」没反应）。老版本可能没有
-       `wallpaperconfig` 那一层，所以两条路都试。 */
+    「哪一节里有 general」—— 写死用户名或者取第一个节都不行。
+    ⚠️ 真正的位置是 `general.wallpaperconfig.selectedwallpapers`（少一层就永远读不到，
+    而它**不报错**：症状只是「跟随当前壁纸」没反应）。老版本可能没有
+    `wallpaperconfig` 那一层，所以两条路都试。 */
     let file = v
         .as_object()?
         .values()
@@ -118,7 +120,8 @@ fn current_wallpaper_file(we: &Path) -> Option<PathBuf> {
 /// 返回 `None` = 这个目录不是一张壁纸（没有/读不出 `project.json`），跳过它。
 fn read_item(dir: &Path, source: &str) -> Option<Value> {
     let id = dir.file_name()?.to_string_lossy().to_string();
-    let proj: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("project.json")).ok()?).ok()?;
+    let proj: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("project.json")).ok()?).ok()?;
     let abs = |p: PathBuf| crate::platform::clean_path(&p);
     let ty = proj
         .get("type")
@@ -127,7 +130,7 @@ fn read_item(dir: &Path, source: &str) -> Option<Value> {
         .trim()
         .to_ascii_lowercase();
     let file = proj.get("file").and_then(Value::as_str).unwrap_or("");
-    let media = std::path::Path::new(file)
+    let media = Path::new(file)
         .is_relative()
         .then(|| dir.join(file))
         .filter(|p| p.is_file())
@@ -168,7 +171,9 @@ pub fn scan(configured_we_dir: &str) -> Value {
             .join("workshop")
             .join("content")
             .join(WE_APP_ID);
-        let Ok(rd) = std::fs::read_dir(&content) else { continue };
+        let Ok(rd) = std::fs::read_dir(&content) else {
+            continue;
+        };
         for e in rd.flatten() {
             if e.path().is_dir() {
                 dirs.push((e.path(), "workshop"));
@@ -176,8 +181,13 @@ pub fn scan(configured_we_dir: &str) -> Value {
         }
     }
     if let Some(we) = we.as_ref() {
-        for (sub, source) in [("myprojects", "myprojects"), ("defaultprojects", "defaultprojects")] {
-            let Ok(rd) = std::fs::read_dir(we.join("projects").join(sub)) else { continue };
+        for (sub, source) in [
+            ("myprojects", "myprojects"),
+            ("defaultprojects", "defaultprojects"),
+        ] {
+            let Ok(rd) = std::fs::read_dir(we.join("projects").join(sub)) else {
+                continue;
+            };
             for e in rd.flatten() {
                 if e.path().is_dir() {
                     dirs.push((e.path(), source));
@@ -188,11 +198,13 @@ pub fn scan(configured_we_dir: &str) -> Value {
 
     // 当前壁纸：WE 记的是**文件**路径，取父目录；扫到的条目里正好有它就带上标题
     let current_file = we.as_ref().and_then(|w| current_wallpaper_file(w));
-    let current_dir = current_file.as_ref().and_then(|f| f.parent().map(Path::to_path_buf));
+    let current_dir = current_file
+        .as_ref()
+        .and_then(|f| f.parent().map(Path::to_path_buf));
     if let Some(d) = current_dir.as_ref() {
         if !dirs.iter().any(|(p, _)| p == d) {
             /* 本地工程（`myprojects` 之外的地方）或者订阅刚被删：条目里没有它，
-               但用户此刻正用着 —— 单独补一条，别让「跟随当前壁纸」无从下手。 */
+            但用户此刻正用着 —— 单独补一条，别让「跟随当前壁纸」无从下手。 */
             dirs.push((d.clone(), "local"));
         }
     }
@@ -205,13 +217,13 @@ pub fn scan(configured_we_dir: &str) -> Value {
     }
     let current = current_dir
         .as_ref()
-        .and_then(|d| items.iter().find(|i| i.get("dir").and_then(Value::as_str) == Some(&crate::platform::clean_path(d))))
+        .and_then(|d| {
+            items.iter().find(|i| {
+                i.get("dir").and_then(Value::as_str) == Some(&crate::platform::clean_path(d))
+            })
+        })
         .cloned()
-        .or_else(|| {
-            current_dir
-                .as_ref()
-                .and_then(|d| read_item(d, "local"))
-        });
+        .or_else(|| current_dir.as_ref().and_then(|d| read_item(d, "local")));
 
     json!({
         "found": we.is_some(),

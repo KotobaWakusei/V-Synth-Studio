@@ -14,10 +14,10 @@ import './ManualPacks.css'
  * 与 `components/Credit.tsx` 的 `Upstream` 同一套路子。
  */
 export function ManualPacks({
-                             dir,
-                             what,
-                             onToast,
-                         }: {
+                                dir,
+                                what,
+                                onToast,
+                            }: {
     /** 扩展包根（后端的 `extDir`）。拿不到就不显示路径那一句 */
     dir?: string
     /** 「运行时那 6 卷和 models.zip」这种，说清要放哪几个文件 */

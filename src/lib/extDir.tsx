@@ -43,7 +43,7 @@ export async function askExtDirOnce(): Promise<boolean> {
 }
 
 /** 页面挂一次就够（`ExtDirAsk` 自己是个全局单例式的小组件）。 */
-export function ExtDirAsk({onDecided}: {onDecided?: (info: ExtDirInfo) => void}) {
+export function ExtDirAsk({onDecided}: { onDecided?: (info: ExtDirInfo) => void }) {
     const [info, setInfo] = useState<ExtDirInfo | null>(null)
     const [busy, setBusy] = useState(false)
     const resolve = useRef<((ok: boolean) => void) | null>(null)

@@ -8,10 +8,10 @@
 //   `generate_handler!`）。
 
 mod artifact;
-mod download;
 mod audio;
 mod bili;
 mod data;
+mod download;
 mod game;
 mod ghmirror;
 mod ipc;
@@ -118,7 +118,7 @@ pub fn run() {
             if paths.installed {
                 note!(
                     "  配置目录：{}",
-                    crate::platform::clean_path(&paths.writable)
+                    platform::clean_path(&paths.writable)
                 );
             }
 
@@ -137,11 +137,11 @@ pub fn run() {
             std::thread::spawn(move || {
                 let _ = state.probe_cached(false);
                 /* 升级清理（见 `crate::upgrade`）：扫几个顶层目录、删自己的临时文件，
-                   毫秒级，但**不能放在 setup 里同步做** —— 那是主线程，而这几条路径
-                   可能在机械盘或网络盘上，慢起来就是「启动时窗口不出现」。 */
-                let _ = crate::upgrade::cleanup(
+                毫秒级，但**不能放在 setup 里同步做** —— 那是主线程，而这几条路径
+                可能在机械盘或网络盘上，慢起来就是「启动时窗口不出现」。 */
+                let _ = upgrade::cleanup(
                     &state.writable,
-                    &crate::artifact::ext_of(&state.writable),
+                    &artifact::ext_of(&state.writable),
                     state.previous_ext_dir.as_deref(),
                 );
             });
@@ -325,10 +325,7 @@ pub struct AppPaths {
 /// `app_data_dir` 是 Tauri 按 `identifier` 推出来的用户目录（安装版的可写落点）。
 /// 交给调用方传进来，因为它在 `setup` 里才拿得到 `AppHandle`；拿不到时退回
 /// [`fallback_data_dir`]（裸 `cargo run`、单元测试这类没有 `AppHandle` 的场合）。
-fn resolve_paths(
-    resource_dir: Option<PathBuf>,
-    app_data_dir: Option<PathBuf>,
-) -> Option<AppPaths> {
+fn resolve_paths(resource_dir: Option<PathBuf>, app_data_dir: Option<PathBuf>) -> Option<AppPaths> {
     let has_data = |d: &Path| d.join("data").join("resources.json").is_file();
 
     /*
@@ -375,8 +372,8 @@ fn resolve_paths(
         }
         let writable = app_data_dir.unwrap_or_else(fallback_data_dir);
         /* 记一行：程序目录可写但被判成安装版时，这一行是唯一能看出「为什么配置
-           没写在程序旁边」的地方（用户级安装落点，见 `in_user_install_dir`）。 */
-        crate::log_line(&format!(
+        没写在程序旁边」的地方（用户级安装落点，见 `in_user_install_dir`）。 */
+        log_line(&format!(
             "路径：程序目录 {} 可写，但它是安装落点 ⇒ 按安装版处理，配置写到 {}",
             rd.display(),
             writable.display()
@@ -469,8 +466,8 @@ fn in_user_install_dir(dir: &Path, cwd: Option<&Path>) -> bool {
 /// 兜底，不该假装知道 bundle 标识。
 fn fallback_data_dir() -> PathBuf {
     /* macOS 上 `APPDATA` / `XDG_CONFIG_HOME` 都不存在，别落到 `~/.config` ——
-       那就与 Tauri 的 `app_data_dir()`（`~/Library/Application Support/<id>`）
-       分成两处了，同一个程序的数据会散在两个目录里。 */
+    那就与 Tauri 的 `app_data_dir()`（`~/Library/Application Support/<id>`）
+    分成两处了，同一个程序的数据会散在两个目录里。 */
     let base = if cfg!(target_os = "macos") {
         std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
     } else {

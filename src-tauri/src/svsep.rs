@@ -130,12 +130,30 @@ const MODEL_PARTS: &[Part] = &[Part {
 /// ⚠️ 重新分卷就要同步改这张表与上面的 `RUNTIME_ZIP_BYTES`（有单测钉着两者相等），
 /// 那两行 `tools/split_volumes.mjs` 跑完会直接打出来。
 const RUNTIME_PARTS: &[Part] = &[
-    Part { name: "runtime.z01", bytes: 966_367_641 },
-    Part { name: "runtime.z02", bytes: 966_367_641 },
-    Part { name: "runtime.z03", bytes: 966_367_641 },
-    Part { name: "runtime.z04", bytes: 966_367_641 },
-    Part { name: "runtime.z05", bytes: 966_367_641 },
-    Part { name: "runtime.zip", bytes: 109_325_902 },
+    Part {
+        name: "runtime.z01",
+        bytes: 966_367_641,
+    },
+    Part {
+        name: "runtime.z02",
+        bytes: 966_367_641,
+    },
+    Part {
+        name: "runtime.z03",
+        bytes: 966_367_641,
+    },
+    Part {
+        name: "runtime.z04",
+        bytes: 966_367_641,
+    },
+    Part {
+        name: "runtime.z05",
+        bytes: 966_367_641,
+    },
+    Part {
+        name: "runtime.zip",
+        bytes: 109_325_902,
+    },
 ];
 
 /// 发布点根目录。
@@ -287,9 +305,7 @@ fn manual_dml(ext: &Path) -> Option<PathBuf> {
         let mut whls: Vec<PathBuf> = rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| {
-                p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("whl"))
-            })
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("whl")))
             .collect();
         whls.sort();
         if let Some(w) = whls.into_iter().find(|p| zip_has_entry(p, DML_PROBE)) {
@@ -404,9 +420,7 @@ pub fn nvidia_present() -> bool {
 /// 改法只认那一行的**前缀**（`use_dml = `）并且只在原缩进下动手，两边都能改回来；
 /// 升级运行时包之后上游要是改了写法，这里会安静地不生效 —— 日志是唯一线索。
 fn set_roformer_dml(ext: &Path, on: bool) -> Result<bool, String> {
-    let f = runtime_base(ext)
-        .join("backend")
-        .join("roformer_engine.py");
+    let f = runtime_base(ext).join("backend").join("roformer_engine.py");
     if !f.is_file() {
         return Err(format!("找不到 {}（运行时还没下？）", f.to_string_lossy()));
     }
@@ -569,9 +583,7 @@ pub async fn download_dml(
     let _ = std::fs::remove_file(&zip);
     set_dml_active(ext, true)?;
     if !dml_installed(ext) {
-        return Err(format!(
-            "包解开了，但没找到 {DML_PROBE} —— 包结构不对？"
-        ));
+        return Err(format!("包解开了，但没找到 {DML_PROBE} —— 包结构不对？"));
     }
     Ok(json!({
         "ok": true,
@@ -589,8 +601,8 @@ pub async fn download_dml(
 /// 用 `artifact::ready` / `artifact::missing`（那才认随包那一层）。
 pub fn models_dir(ext: &Path) -> PathBuf {
     /* 三个基准（`root` / 可写 / svsep）一律传 `ext`：`svsep.models` 那条只查
-       `Base::Ext`，其它基准不会被用到 —— 传什么进去都不会影响结果，而传 `ext`
-       至少保证「万一将来这条 places 改了」不会指到一个莫名其妙的目录。 */
+    `Base::Ext`，其它基准不会被用到 —— 传什么进去都不会影响结果，而传 `ext`
+    至少保证「万一将来这条 places 改了」不会指到一个莫名其妙的目录。 */
     let ctx = crate::artifact::Ctx::with_dirs(ext, ext, ext, ext);
     crate::artifact::download_dest(
         &ctx,
@@ -715,11 +727,11 @@ fn bundle_of(ext: &Path, kind: &str) -> Option<Bundle<'static>> {
 }
 
 /* `.part.url` 记号（「这半个包是谁的」）的实现只有一份，在 `crate::download`
-   —— 与 bili 的下载共用同一套续传判据。下面三个是给本模块内按本地名字取的转发。
+—— 与 bili 的下载共用同一套续传判据。下面三个是给本模块内按本地名字取的转发。
 
-   ⚠️ 为什么这三个不能各留一份：`stored_resume` 那条「记号缺失算可以续、写着
-   别的链接必须当真」的规则，是「换了服务器还接着下、拼出坏 zip」唯一的防线。
-   两处各写一遍，改一处忘一处就等于没防。 */
+⚠️ 为什么这三个不能各留一份：`stored_resume` 那条「记号缺失算可以续、写着
+别的链接必须当真」的规则，是「换了服务器还接着下、拼出坏 zip」唯一的防线。
+两处各写一遍，改一处忘一处就等于没防。 */
 fn url_marker(part: &Path) -> PathBuf {
     crate::download::url_marker(part)
 }
@@ -1372,11 +1384,7 @@ pub struct DownloadCtl {
 }
 
 impl DownloadCtl {
-    pub fn new(
-        pause: &'static AtomicBool,
-        cancel: &'static AtomicBool,
-        resume: bool,
-    ) -> Self {
+    pub fn new(pause: &'static AtomicBool, cancel: &'static AtomicBool, resume: bool) -> Self {
         pause.store(false, Ordering::Relaxed);
         cancel.store(false, Ordering::Relaxed);
         Self {
@@ -1500,7 +1508,7 @@ impl<'a> Bundle<'a> {
     fn manual_sets(&self) -> Vec<Vec<PathBuf>> {
         let mut sets = Vec::new();
         /* 资产名那一套：**落点里、或扩展包根下**都认 —— 用户很可能不管什么子目录，
-           整个丢在根上（界面那行提示写的就是根）。 */
+        整个丢在根上（界面那行提示写的就是根）。 */
         for dir in [&self.dest, &self.ext] {
             let named: Vec<PathBuf> = self.parts.iter().map(|p| dir.join(p.name)).collect();
             if !named.iter().all(|p| p.is_file()) || sets.contains(&named) {
@@ -1580,9 +1588,7 @@ fn zips_in(dir: &Path) -> Vec<PathBuf> {
     };
     rd.flatten()
         .map(|e| e.path())
-        .filter(|p| {
-            p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip"))
-        })
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")))
         .collect()
 }
 
@@ -1754,20 +1760,20 @@ async fn fetch_bundle(
 
     if !whole {
         /* 进度分母 = 表里那些字节数之和。⚠️ 表是**人抄的**，与 release 上真不一样时
-           只让进度条难看一点，不影响成不成 —— 所以下面报进度时按总量夹一下，
-           免得条子冲过 100%。 */
+        只让进度条难看一点，不影响成不成 —— 所以下面报进度时按总量夹一下，
+        免得条子冲过 100%。 */
         let grand_total: u64 = b.parts.iter().map(|p| p.bytes).sum();
 
         /* ⚠️ **几卷一起下，不是一卷一卷来。** 实测（2026-10，那条 ~1.4 Mbit/s 的线路上）：
-           单连接 0.23 MB/s、六连接合计 0.60 MB/s —— 瓶颈是**每连接**的，串行下这几个 GB
-           要多花一倍多的时间；健康线路上多连接也是「更快」的那一侧（下载器都这么干）。
-           ⚠️ 并发度就是卷数（现在 6），**别再往上加**：再多对端就开始按 IP 限速了。
-           ⚠️ 进度是**各卷增量之和**：`got` 是**那一卷**的累计字节（续传时还含盘上已有的），
-           拿它当全局进度会让条子在几卷之间来回跳，所以每卷只把自己的增量累加进去。 */
+        单连接 0.23 MB/s、六连接合计 0.60 MB/s —— 瓶颈是**每连接**的，串行下这几个 GB
+        要多花一倍多的时间；健康线路上多连接也是「更快」的那一侧（下载器都这么干）。
+        ⚠️ 并发度就是卷数（现在 6），**别再往上加**：再多对端就开始按 IP 限速了。
+        ⚠️ 进度是**各卷增量之和**：`got` 是**那一卷**的累计字节（续传时还含盘上已有的），
+        拿它当全局进度会让条子在几卷之间来回跳，所以每卷只把自己的增量累加进去。 */
         let done = std::sync::atomic::AtomicU64::new(0);
         let futs = files.iter().map(|(url, path)| {
             /* 真的去拉字节 —— 走 `crate::download`，与 bili 的视频下载共用同一份。
-               这里只剩「这一卷在哪儿、叫什么」这两件**这个宿主特有**的事。 */
+            这里只剩「这一卷在哪儿、叫什么」这两件**这个宿主特有**的事。 */
             let req = crate::download::Request {
                 url,
                 label: b.label,
@@ -1778,9 +1784,9 @@ async fn fetch_bundle(
                 client: crate::download::default_client(),
                 retry: crate::download::Retry::BIG_PACK,
                 /* ⚠️ **不核对字节数**：`expect` 对不上会把这一轮算成失败，而它拿的
-                   正是上面那张人抄的表 —— 表与 release 差一个字节就等于**永远下不完**。
-                   截断由 reqwest 的流错误（`Content-Length` 不满足）与解压时的
-                   EOCD / CRC 兜住。 */
+                正是上面那张人抄的表 —— 表与 release 差一个字节就等于**永远下不完**。
+                截断由 reqwest 的流错误（`Content-Length` 不满足）与解压时的
+                EOCD / CRC 兜住。 */
                 expect: None,
             };
             let last = std::sync::atomic::AtomicU64::new(0);
@@ -1816,7 +1822,7 @@ async fn fetch_bundle(
         }
 
         /* 停止 = 这个包不要了：**所有分卷一起删**。留下任何一卷，界面上「已经下好 N」
-           就还挂着一半，用户下次点「继续下载」又接上。 */
+        就还挂着一半，用户下次点「继续下载」又接上。 */
         if ctl.cancelled() {
             for (_, p) in &files {
                 let _ = std::fs::remove_file(p);
@@ -1826,11 +1832,11 @@ async fn fetch_bundle(
         }
         if let Some(e) = first_err {
             /* ⚠️ 万一这一轮其实已经把整包下到手、只是收尾报了错：就地改判成「下完了」
-               去解压。不改判的话，下次点「继续下载」会带着「整包长」的 Range 再发一次
-               请求 —— 那是把几个 GB 从头下一遍。 */
+            去解压。不改判的话，下次点「继续下载」会带着「整包长」的 Range 再发一次
+            请求 —— 那是把几个 GB 从头下一遍。 */
             if !pack_is_whole_zip(&paths) {
                 /* ⚠️ 失败时**不删** `.part`，记号也不删：删掉 = 用户得把几 GB 再下一遍
-                   （流量是他自己的）。留着的话界面会显示「已经下好 N，接着下」。 */
+                （流量是他自己的）。留着的话界面会显示「已经下好 N，接着下」。 */
                 return Err(format!(
                     "{e}；已下的 {} 字节留在盘上，下次点「继续下载」从这儿接着下",
                     leftover(&paths)
@@ -1844,13 +1850,13 @@ async fn fetch_bundle(
     }
 
     /* 下面这一段是**解压**、不是下载。`unpack_volumes` 负责把阶段切成 `Extract`
-       （界面据此把标签从「正在下载…」改成「正在解压…」），别在调用点各写一遍
-       那两行样板，见 `unpack` 的注释。 */
+    （界面据此把标签从「正在下载…」改成「正在解压…」），别在调用点各写一遍
+    那两行样板，见 `unpack` 的注释。 */
     match unpack_volumes(&src, &b.dest, b.strip, on_progress) {
         Ok(report) => {
             /* 解好了才删：它们有几 GB，留着没用。手放的那份也一起删 —— 已经装进
-               `dest` 了，再压着一个 4.9 GB 的包只是占地方。两条路取并集删，不存在
-               的文件删一下是无害的。 */
+            `dest` 了，再压着一个 4.9 GB 的包只是占地方。两条路取并集删，不存在
+            的文件删一下是无害的。 */
             for p in src.iter().chain(paths.iter()) {
                 let _ = std::fs::remove_file(p);
                 let _ = std::fs::remove_file(url_marker(p));
@@ -1985,16 +1991,16 @@ pub async fn fetch_to_file(
         url,
         label: "文件",
         /* ⚠️ `out` 是**最终文件名**（不是 `.part`）。`Plain` 会保证失败之后
-           盘上不留半截文件 —— 留下的话没有东西会去认领它，只会让人以为下过了。 */
+        盘上不留半截文件 —— 留下的话没有东西会去认领它，只会让人以为下过了。 */
         part: out,
         headers: &[],
         shape: crate::download::Shape::Plain,
         client: crate::download::default_client(),
         /* 5 轮 × 10 秒，和 `fetch_bundle` 一致：网络抖动通常一两轮就过去了，
-           真接不上（DNS 挂了、被墙）第五轮也还是接不上。
-           ⚠️ 这里用的就是**引擎自己的**重试循环 —— 大小核对（`expect`）在引擎里
-           也算「这一轮失败」，于是「截断的响应 → 等 10 秒 → 删掉重下」这条路
-           不用在这里另写一遍。 */
+        真接不上（DNS 挂了、被墙）第五轮也还是接不上。
+        ⚠️ 这里用的就是**引擎自己的**重试循环 —— 大小核对（`expect`）在引擎里
+        也算「这一轮失败」，于是「截断的响应 → 等 10 秒 → 删掉重下」这条路
+        不用在这里另写一遍。 */
         retry: crate::download::Retry::BIG_PACK,
         // 「官方大小」：对不上就当这一轮失败（GitHub release 偶发截断响应）
         expect,
@@ -2003,7 +2009,7 @@ pub async fn fetch_to_file(
     match crate::download::download(&req, &control(ctl), &note).await {
         Ok(crate::download::Outcome::Done { bytes }) => Ok(bytes),
         /* 暂停 —— 这个路径没有续传，所以和停止一样：引擎已经把半截文件删了。
-           返回一句能看懂的话而不是假装成功（调用方会把它当失败报给界面）。 */
+        返回一句能看懂的话而不是假装成功（调用方会把它当失败报给界面）。 */
         Ok(crate::download::Outcome::Paused { .. }) => {
             Err("下载已暂停。再点一次会从头下（这个包不支持续传）。".into())
         }
@@ -2205,9 +2211,9 @@ pub fn unpack_volumes(
     })
     .map_err(|e| {
         /* ⚠️ 分卷最可能的一种坏法不是「少下了一卷」（那会在 `Volumes::open` 就说是缺哪一卷），
-           而是**发布点上那几卷不是「按字节切」的**：WinZip / Bandizip 的「跨卷 zip」是另一种
-           格式（中央目录里记的是「第几卷 + 卷内偏移」），首尾相接不是合法 zip。
-           用户为这个错已经等了几 GB 的下载，所以这里直接把话说到底。 */
+        而是**发布点上那几卷不是「按字节切」的**：WinZip / Bandizip 的「跨卷 zip」是另一种
+        格式（中央目录里记的是「第几卷 + 卷内偏移」），首尾相接不是合法 zip。
+        用户为这个错已经等了几 GB 的下载，所以这里直接把话说到底。 */
         if parts.len() > 1 {
             format!(
                 "{e}；⚠️ 这几卷如果是用 WinZip / Bandizip 那种「跨卷 zip」分的，拼起来本来就不是 \
@@ -2275,10 +2281,7 @@ impl Volumes {
         if pos >= self.total {
             return None;
         }
-        let i = match self.starts.binary_search(&pos) {
-            Ok(i) => i,
-            Err(i) => i - 1, // pos 落在第 i-1 卷里（i==0 时 pos<starts[0] 不可能）
-        };
+        let i = self.starts.binary_search(&pos).unwrap_or_else(|i| i - 1);
         Some((i, pos - self.starts[i]))
     }
 }
@@ -2391,37 +2394,41 @@ fn extract_from<R: std::io::Read + std::io::Seek>(
     strip: &str,
     mut on_progress: impl FnMut(u64, u64),
 ) -> Result<ExtractReport, String> {
-    let mut zip =
-        zip::ZipArchive::new(reader).map_err(|e| format!("不是有效的 zip（读不出中央目录）：{e}"))?;
+    let mut zip = zip::ZipArchive::new(reader)
+        .map_err(|e| format!("不是有效的 zip（读不出中央目录）：{e}"))?;
     let mut report = ExtractReport { files: 0, bytes: 0 };
     let mut done_src: u64 = 0;
 
     /* ⚠️ 分母先算出来，别写在循环里 —— runtime 有 2.7 万个条目，每轮重新 sum
-       一遍就是几千万次加法。
-       ⚠️ `.max(1)` 要与下面 `done_src` 的口径**一模一样**：零字节条目（目录、
-       空文件）按 1 计数，否则分子会超过分母、进度条冲到 100% 以上。
-       ⚠️ 用 `compressed_size()`（盘上的字节数）而不是 `size()`（解出来的字节数）：
-       进度条量的是「还剩多少要读」，而解压时间大致正比于**压缩后**的字节。 */
+    一遍就是几千万次加法。
+    ⚠️ `.max(1)` 要与下面 `done_src` 的口径**一模一样**：零字节条目（目录、
+    空文件）按 1 计数，否则分子会超过分母、进度条冲到 100% 以上。
+    ⚠️ 用 `compressed_size()`（盘上的字节数）而不是 `size()`（解出来的字节数）：
+    进度条量的是「还剩多少要读」，而解压时间大致正比于**压缩后**的字节。 */
     let mut total_src: u64 = 0;
     for i in 0..zip.len() {
-        let e = zip.by_index(i).map_err(|e| format!("读第 {i} 个条目失败：{e}"))?;
+        let e = zip
+            .by_index(i)
+            .map_err(|e| format!("读第 {i} 个条目失败：{e}"))?;
         total_src += e.compressed_size().max(1);
     }
 
     for i in 0..zip.len() {
-        let mut e = zip.by_index(i).map_err(|e| format!("读第 {i} 个条目失败：{e}"))?;
+        let mut e = zip
+            .by_index(i)
+            .map_err(|e| format!("读第 {i} 个条目失败：{e}"))?;
         // 跳过的条目（目录、空名）也要推进进度，否则分母算了它们、
         // 分子没算，进度条就永远到不了头（单测钉着这一条）。
         done_src += e.compressed_size().max(1);
 
         let raw_name = e.name().replace('\\', "/");
         /* ⚠️ 用 `enclosed_name()` 而不是 `mangled_name()`/`sanitized_name()`：
-           后两者会**静默地把 `..` 改掉**，于是危险条目变成「一个名字很怪的正常
-           文件」被正常解出来 —— 那是把安全问题藏起来。我们宁可当场报错
-           （用户看得懂「zip 里的路径不安全」）。 */
-        let safe = e.enclosed_name().ok_or_else(|| {
-            format!("zip 里的路径不安全（会解到目标目录外面）：{raw_name}")
-        })?;
+        后两者会**静默地把 `..` 改掉**，于是危险条目变成「一个名字很怪的正常
+        文件」被正常解出来 —— 那是把安全问题藏起来。我们宁可当场报错
+        （用户看得懂「zip 里的路径不安全」）。 */
+        let safe = e
+            .enclosed_name()
+            .ok_or_else(|| format!("zip 里的路径不安全（会解到目标目录外面）：{raw_name}"))?;
         let rel = safe.to_string_lossy().replace('\\', "/");
         let rel = rel.trim_start_matches("./");
         let rel = if strip.is_empty() {
@@ -2431,17 +2438,17 @@ fn extract_from<R: std::io::Read + std::io::Seek>(
         };
 
         /* 目录条目不算文件。⚠️ **必须用 `e.is_dir()`**，不能看「名字以 `/` 结尾」：
-           `enclosed_name()` 是拿 `PathBuf` 拼的，`models/` 到那儿已经变成
-           `models`（尾斜杠被规范化掉了）—— 照名字判的话目录会被当成文件解出来，
-           `report.files` 于是比真实文件数多（单测当场抓到）。 */
+        `enclosed_name()` 是拿 `PathBuf` 拼的，`models/` 到那儿已经变成
+        `models`（尾斜杠被规范化掉了）—— 照名字判的话目录会被当成文件解出来，
+        `report.files` 于是比真实文件数多（单测当场抓到）。 */
         if !rel.is_empty() && !e.is_dir() {
             let out = dest.join(rel);
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| format!("建目录失败：{e}"))?;
             }
             /* 流式解 —— 不把整个压缩体先读进 `Vec`。
-               ⚠️ 错误里必须带上条目名：`io` 错误（磁盘满、文件被占用）本身
-               指不到是哪个文件，两万多条里靠猜是查不出来的。 */
+            ⚠️ 错误里必须带上条目名：`io` 错误（磁盘满、文件被占用）本身
+            指不到是哪个文件，两万多条里靠猜是查不出来的。 */
             let mut w =
                 std::fs::File::create(&out).map_err(|er| format!("建「{raw_name}」失败：{er}"))?;
             std::io::copy(&mut e, &mut w)
@@ -2740,7 +2747,6 @@ mod tests {
         assert!(dest.join("runtime").join("python.exe").is_file());
         let _ = std::fs::remove_dir_all(&base);
     }
-
 
     /// 拿**真的**包跑一遍 —— 单测里的 zip 是我自己造的，而用户手上那两个包是
     /// PowerShell 的 `ZipFile.CreateFromDirectory` 造的（可能用数据描述符、
@@ -3258,7 +3264,7 @@ mod tests {
         std::fs::write(&whole, &zip).unwrap();
 
         /* 切成 7 字节一卷 —— 比条目头还小，正好把「跨卷读」那条路踩满
-           （真包是 966 MB 一卷，那条路上除了边界别的都一样）。 */
+        （真包是 966 MB 一卷，那条路上除了边界别的都一样）。 */
         let vol_dir = dir.join("vols");
         std::fs::create_dir_all(&vol_dir).unwrap();
         let mut parts = Vec::new();
@@ -3272,8 +3278,8 @@ mod tests {
         // ① 少一卷：当场说清缺的是哪一卷，而不是解出一堆坏文件
         let missing = parts[1].clone();
         std::fs::remove_file(&missing).unwrap();
-        let err = extract_volumes(&parts, &dir.join("out"), "", |_, _| {})
-            .expect_err("少一卷必须报错");
+        let err =
+            extract_volumes(&parts, &dir.join("out"), "", |_, _| {}).expect_err("少一卷必须报错");
         assert!(
             err.contains(&missing.file_name().unwrap().to_string_lossy().to_string()),
             "错误里要说清缺的是哪一卷：{err}"
@@ -3284,13 +3290,20 @@ mod tests {
         let (from_vols, from_whole) = (dir.join("out-vols"), dir.join("out-whole"));
         let rv = extract_volumes(&parts, &from_vols, "runtime/", |_, _| {}).expect("分卷解不开");
         let rw = extract_zip(&whole, &from_whole, "runtime/", |_, _| {}).expect("整包解不开");
-        assert_eq!((rv.files, rv.bytes), (rw.files, rw.bytes), "分卷与整包解出的量不一致");
+        assert_eq!(
+            (rv.files, rv.bytes),
+            (rw.files, rw.bytes),
+            "分卷与整包解出的量不一致"
+        );
         assert_eq!(
             std::fs::read(from_vols.join("python.exe")).unwrap(),
             inner.as_bytes(),
             "跨卷拼出来的第一个条目就不对 —— 卷内偏移算错了"
         );
-        assert_eq!(std::fs::read(from_vols.join("Lib/b.dll")).unwrap().len(), 123);
+        assert_eq!(
+            std::fs::read(from_vols.join("Lib/b.dll")).unwrap().len(),
+            123
+        );
         assert_eq!(
             std::fs::read(from_vols.join("Lib/a.dll")).unwrap(),
             std::fs::read(from_whole.join("Lib/a.dll")).unwrap(),
@@ -3425,7 +3438,7 @@ mod tests {
                         let now = inflight.fetch_add(1, Ordering::AcqRel) + 1;
                         peak.fetch_max(now, Ordering::AcqRel);
                         // 慢一点：让六条请求真的叠在一起，否则「并发」根本验不出来
-                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        std::thread::sleep(Duration::from_millis(250));
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\
                              Connection: close\r\n\r\n",
@@ -3450,7 +3463,7 @@ mod tests {
         static STOP: AtomicBool = AtomicBool::new(false);
         let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
         /* 下载段与解压段的**分母不是一回事**（解压报的是各条目压缩后大小之和），所以分开记
-           —— 只留最后一个 `total` 会拿到解压那个数，看着像「分母错了」。 */
+        —— 只留最后一个 `total` 会拿到解压那个数，看着像「分母错了」。 */
         let seen = std::sync::Arc::new(Mutex::new((0u64, 0u64, 0usize, 0usize)));
         let seen2 = seen.clone();
         let out = fetch_bundle(&b, &ctl, &move |got, total, stage| {
@@ -3477,7 +3490,10 @@ mod tests {
             peak.load(Ordering::Acquire)
         );
         assert!(dl_ticks > 10, "下载进度回调只有 {dl_ticks} 次，像是没真下");
-        assert!(ex_ticks > 0, "一次解压回调都没有 —— 六卷没被当成一个 zip 解");
+        assert!(
+            ex_ticks > 0,
+            "一次解压回调都没有 —— 六卷没被当成一个 zip 解"
+        );
         assert_eq!(dl_total, RUNTIME_ZIP_BYTES, "进度分母该是表里六卷之和");
         assert!(
             max_got >= zip.len() as u64,
@@ -3571,10 +3587,16 @@ mod tests {
              总耗时 {:?}",
             t.elapsed()
         );
-        assert!(matches!(out, FetchOutcome::Done(_)), "收场不是 Done：{out:?}");
-        assert!(total == RUNTIME_ZIP_BYTES, "进度分母该是六卷之和 {RUNTIME_ZIP_BYTES}，实际 {total}");
+        assert!(
+            matches!(out, FetchOutcome::Done(_)),
+            "收场不是 Done：{out:?}"
+        );
+        assert_eq!(total, RUNTIME_ZIP_BYTES, "进度分母该是六卷之和 {RUNTIME_ZIP_BYTES}，实际 {total}");
         assert!(dl_ticks > 50, "下载回调只有 {dl_ticks} 次，像是没真下");
-        assert!(ex_ticks > 0, "一次解压回调都没有 —— 六卷没被当成一个 zip 解");
+        assert!(
+            ex_ticks > 0,
+            "一次解压回调都没有 —— 六卷没被当成一个 zip 解"
+        );
 
         assert!(runtime_ready(&dest), "下完解完却不算就绪");
         for f in ["runtime/python.exe", "backend/app.py", "bin/ffmpeg.exe"] {
@@ -3622,7 +3644,7 @@ mod tests {
         static STOP: AtomicBool = AtomicBool::new(false);
         let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
         /* 链接指向一个**必定连不上**的地址：真去下就必然失败 —— 这条测试能过，
-           就说明它压根没联网。 */
+        就说明它压根没联网。 */
         let out = download_models(&dest, "http://127.0.0.1:9/x.zip", &ctl, |_, _, _| {})
             .await
             .expect("手放的包该直接解开");
@@ -3673,11 +3695,7 @@ mod tests {
         assert!(matches!(out, FetchOutcome::Done(_)), "没收场：{out:?}");
         assert!(runtime_ready(&dest), "解完却不就绪");
         for p in RUNTIME_PARTS {
-            assert!(
-                !svsep.join(p.name).exists(),
-                "解完该删掉手放的 {}",
-                p.name
-            );
+            assert!(!svsep.join(p.name).exists(), "解完该删掉手放的 {}", p.name);
         }
         let _ = std::fs::remove_dir_all(&dest);
     }
@@ -3732,7 +3750,7 @@ mod tests {
         std::fs::create_dir_all(&svsep).unwrap();
 
         /* ① 单文件包的整包（123 上那份没有分卷，就是一个大 zip）丢在**扩展包根**上：
-           要能被认出来。名字故意取得不标准。 */
+        要能被认出来。名字故意取得不标准。 */
         let runtime_zip = make_zip(&[
             ("runtime/python.exe", b"python-exe", true),
             ("backend/app.py", b"print(1)", true),
@@ -3740,7 +3758,7 @@ mod tests {
         ]);
         std::fs::write(dest.join("runtime 整包.zip"), &runtime_zip).unwrap();
         /* ② 旁边再放一个**别人的**包：它也是个能读的 zip，而且名字排更前
-           （`GAME…` < `runtime…`）—— 按名字挑就会挑中它。 */
+        （`GAME…` < `runtime…`）—— 按名字挑就会挑中它。 */
         let other = make_zip(&[("GAME-1.0.3-large-onnx/encoder.onnx", b"x", true)]);
         std::fs::write(dest.join("GAME-1.0.3-large-onnx.zip"), &other).unwrap();
         // ③ 模型那一层也不能被别人的包骗到
@@ -3827,7 +3845,11 @@ mod tests {
 
         let got = manual_files(&dest, "runtime");
         println!("手放的真整包：{got:?}");
-        assert_eq!(got, vec![name.to_string_lossy().to_string()], "该认出这个整包");
+        assert_eq!(
+            got,
+            vec![name.to_string_lossy().to_string()],
+            "该认出这个整包"
+        );
         // 同一套判据下，模型那一层不该认它
         let models = models_dir(&dest);
         std::fs::create_dir_all(&models).unwrap();
@@ -3856,7 +3878,11 @@ mod tests {
         // wheel 就是个 zip：认包看里面有没有那个 dll
         let whl = make_zip(&[
             ("onnxruntime/capi/onnxruntime.dll", b"dml-dll", true),
-            ("onnxruntime_directml-1.23.0.dist-info/METADATA", b"x", false),
+            (
+                "onnxruntime_directml-1.23.0.dist-info/METADATA",
+                b"x",
+                false,
+            ),
         ]);
         // 名字故意带 `(1)`（浏览器下载的常见形状）
         let name = "onnxruntime_directml-1.23.0-cp310-cp310-win_amd64 (1).whl";
@@ -4092,7 +4118,11 @@ mod tests {
         assert!(svsep.join("app.py").is_file(), "backend 的 .py 不该被删");
         assert!(svsep.join("config.py").is_file());
         assert!(svsep.join("outputs").is_dir(), "用户的输出目录不该被删");
-        for vol in ["runtime.z01.part", "runtime.z02.part", "runtime.z02.part.url"] {
+        for vol in [
+            "runtime.z01.part",
+            "runtime.z02.part",
+            "runtime.z02.part.url",
+        ] {
             assert!(
                 !svsep.join(vol).exists(),
                 "运行时那半个包（{vol}）要清掉 —— 漏一卷就是几个 GB 留在盘上"
@@ -4137,7 +4167,12 @@ mod tests {
             .collect();
         assert_eq!(
             parts,
-            vec![writable.join("svsep").join("models").join("models.zip.part")],
+            vec![
+                writable
+                    .join("svsep")
+                    .join("models")
+                    .join("models.zip.part")
+            ],
             "落点要跟着 Bundle 走，不能自己拼"
         );
         let part = parts[0].clone();

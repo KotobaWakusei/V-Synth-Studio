@@ -20,9 +20,9 @@ export type {WeItem, WeScan}
 
 /** 这一层要画什么。`none` = 回到静态背景图。 */
 export type WallpaperPlan =
-    | {kind: 'none'}
-    | {kind: 'scene'; item: WeItem; pkg: string}
-    | {kind: 'video' | 'image'; item: WeItem; src: string}
+    | { kind: 'none' }
+    | { kind: 'scene'; item: WeItem; pkg: string }
+    | { kind: 'video' | 'image'; item: WeItem; src: string }
 
 const VIDEO_EXT = ['.mp4', '.webm', '.mkv', '.mov', '.m4v', '.avi']
 

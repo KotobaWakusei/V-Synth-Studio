@@ -12,7 +12,14 @@ import {DropHint, useFilePick} from '@/components/FilePick'
 import {askExtDirOnce, ExtDirAsk} from '@/lib/extDir'
 import {baseName, errText, formatBytes} from '@/lib/format'
 import {POLL_STATUS, useStatusPoll} from '@/lib/polling'
-import {downloadBytes, extractedBytes, installLabel, missingSteps, type InstallStep, useInstaller,} from '@/lib/useInstaller'
+import {
+    downloadBytes,
+    extractedBytes,
+    installLabel,
+    type InstallStep,
+    missingSteps,
+    useInstaller,
+} from '@/lib/useInstaller'
 import {capOk} from '@/lib/types'
 import type {PageProps} from './types'
 import './Svsep.css'
@@ -724,34 +731,34 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                         </Finding>
                     )}
                     {localOk && (
-                    <div className="svsep-stats">
-                        <Stat
-                            label="服务"
-                            value={running ? '运行中' : '空闲'}
-                            sub="分离时自动启动，跑完自动关"
-                        />
-                        <Stat
-                            label="运行时"
-                            value={runtimeReady ? '就绪' : '缺失'}
-                            /* ⚠️ `expectedBytes` 是**解压后**的容量（7.4 GB），要下的是 4.7 GB 的压缩包。
-                               缺的时候两个数都给，不然用户会以为要下 7.4 GB。 */
-                            sub={
-                                runtimeReady
-                                    ? undefined
-                                    : `下 ${formatBytes(downloadBytes(st?.runtime))} · 解压 ${formatBytes(extractedBytes(st?.runtime))}`
-                            }
-                        />
-                        <Stat
-                            label="模型"
-                            value={modelsOk ? '就绪' : '缺失'}
-                            sub={
-                                modelsOk
-                                    ? modelItems.map((m) => formatBytes(m.size)).join(' + ')
-                                    : `下 ${formatBytes(downloadBytes(st?.models))} · 解压 ${formatBytes(extractedBytes(st?.models))}`
-                            }
-                        />
-                        {badge && <Stat label="设备" value={badge}/>}
-                    </div>
+                        <div className="svsep-stats">
+                            <Stat
+                                label="服务"
+                                value={running ? '运行中' : '空闲'}
+                                sub="分离时自动启动，跑完自动关"
+                            />
+                            <Stat
+                                label="运行时"
+                                value={runtimeReady ? '就绪' : '缺失'}
+                                /* ⚠️ `expectedBytes` 是**解压后**的容量（7.4 GB），要下的是 4.7 GB 的压缩包。
+                                   缺的时候两个数都给，不然用户会以为要下 7.4 GB。 */
+                                sub={
+                                    runtimeReady
+                                        ? undefined
+                                        : `下 ${formatBytes(downloadBytes(st?.runtime))} · 解压 ${formatBytes(extractedBytes(st?.runtime))}`
+                                }
+                            />
+                            <Stat
+                                label="模型"
+                                value={modelsOk ? '就绪' : '缺失'}
+                                sub={
+                                    modelsOk
+                                        ? modelItems.map((m) => formatBytes(m.size)).join(' + ')
+                                        : `下 ${formatBytes(downloadBytes(st?.models))} · 解压 ${formatBytes(extractedBytes(st?.models))}`
+                                }
+                            />
+                            {badge && <Stat label="设备" value={badge}/>}
+                        </div>
                     )}
 
                     {dl && (installer.installing || dl.active) && (
@@ -831,24 +838,24 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                做同一个决定，还可能出现「选了 GPU 但加速没开」这种自相矛盾的状态。
                选 GPU 时后端会顺手把没下的加速包下上（A 卡 / 核显）。 */}
                     {localOk && (
-                    <div className="btn-row">
-                        <div className="svsep-infer">
-                            <span className="dim">{t("推理方式")}</span>
-                            <GlassSegmentedControl
-                                aria-label={t("推理方式")}
-                                items={INFER_MODES}
-                                value={inferMode}
-                                onValueChange={(v: string) => void doSetInfer(asInferMode(v))}
-                            />
+                        <div className="btn-row">
+                            <div className="svsep-infer">
+                                <span className="dim">{t("推理方式")}</span>
+                                <GlassSegmentedControl
+                                    aria-label={t("推理方式")}
+                                    items={INFER_MODES}
+                                    value={inferMode}
+                                    onValueChange={(v: string) => void doSetInfer(asInferMode(v))}
+                                />
+                            </div>
+                            <Button
+                                variant="ghost"
+                                icon="folder"
+                                onClick={() => void api.fsOpen({path: st?.outputsDir})}
+                            >
+                                输出目录
+                            </Button>
                         </div>
-                        <Button
-                            variant="ghost"
-                            icon="folder"
-                            onClick={() => void api.fsOpen({path: st?.outputsDir})}
-                        >
-                            输出目录
-                        </Button>
-                    </div>
                     )}
                     {st?.dml?.nvidia && (
                         <p className="hint">{t("检测到 NVIDIA 显卡：选 GPU（或自动）就走 CUDA，不需要加速包。")}</p>
@@ -865,28 +872,28 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                         不做条件渲染 —— 引擎还没下全的时候也该留着这个入口，用户可能想
                         把之前下了一半的东西清掉。 */}
                     {localOk && (
-                    <DangerZone
-                        label="删除全部依赖"
-                        armed={armDelete}
-                        onArm={() => setArmDelete(true)}
-                        onCancel={() => setArmDelete(false)}
-                        onConfirm={() => void doDeleteDeps()}
-                        confirmText={`确认删除（要重下约 ${formatBytes(allBytes)}）`}
-                        armedText={
-                            <>
-                                要删掉：运行时（解压后 {formatBytes(extractedBytes(st?.runtime))}）、模型（解压后{' '}
-                                {formatBytes(extractedBytes(st?.models))}）、分离引擎自带的 ffmpeg。
-                                删完离线分离就用不了了，得重新下 <strong>约 {formatBytes(allBytes)}</strong>。
-                                已经分离出来的音频<strong>{t("不会被删")}</strong>。
-                            </>
-                        }
-                        idleText={
-                            <>
-                                离线分离的引擎和模型约占{' '}
-                                {formatBytes(extractedBytes(st?.runtime) + extractedBytes(st?.models))}。
-                            </>
-                        }
-                    />
+                        <DangerZone
+                            label="删除全部依赖"
+                            armed={armDelete}
+                            onArm={() => setArmDelete(true)}
+                            onCancel={() => setArmDelete(false)}
+                            onConfirm={() => void doDeleteDeps()}
+                            confirmText={`确认删除（要重下约 ${formatBytes(allBytes)}）`}
+                            armedText={
+                                <>
+                                    要删掉：运行时（解压后 {formatBytes(extractedBytes(st?.runtime))}）、模型（解压后{' '}
+                                    {formatBytes(extractedBytes(st?.models))}）、分离引擎自带的 ffmpeg。
+                                    删完离线分离就用不了了，得重新下 <strong>约 {formatBytes(allBytes)}</strong>。
+                                    已经分离出来的音频<strong>{t("不会被删")}</strong>。
+                                </>
+                            }
+                            idleText={
+                                <>
+                                    离线分离的引擎和模型约占{' '}
+                                    {formatBytes(extractedBytes(st?.runtime) + extractedBytes(st?.models))}。
+                                </>
+                            }
+                        />
                     )}
                     {st?.lastError && (
                         <Finding level="warn" title={t("上次启动失败")}>

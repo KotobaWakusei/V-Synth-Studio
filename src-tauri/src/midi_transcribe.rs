@@ -236,7 +236,7 @@ fn probe_cuda(dll: Option<&Path>) -> CudaInfo {
             return CudaInfo {
                 available: false,
                 detail: "还没找到 ONNX Runtime 动态库".into(),
-            }
+            };
         }
     };
     /* ⛔ **ONNX Runtime 本体必须先加载，否则下面任何一句 ORT 调用都会 panic**：
@@ -247,7 +247,7 @@ fn probe_cuda(dll: Option<&Path>) -> CudaInfo {
     没有错误回复，别的命令却正常。加载一次够（`ort::init_from` 内部是 `OnceLock`）。 */
     static RUNTIME_LOADED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if RUNTIME_LOADED.get().is_none() {
-        if let Err(e) = crate::game::engine::load_runtime(dll) {
+        if let Err(e) = engine::load_runtime(dll) {
             return CudaInfo {
                 available: false,
                 detail: e,
@@ -326,13 +326,13 @@ fn probe_cuda(dll: Option<&Path>) -> CudaInfo {
             return CudaInfo {
                 available: false,
                 detail: "这份 ONNX Runtime 里没有 CUDA provider（CPU 构建）".into(),
-            }
+            };
         }
         Err(e) => {
             return CudaInfo {
                 available: false,
                 detail: format!("问 ONNX Runtime「有没有 CUDA」时出错：{e}"),
-            }
+            };
         }
     }
     /* ⚠️ 这里**不能用 `?` 或 `and_then` 串**：`with_execution_providers` 失败时回的是
@@ -346,7 +346,10 @@ fn probe_cuda(dll: Option<&Path>) -> CudaInfo {
                 ort::ep::CPU::default().build(),
             ])
             .map_err(|e| e.to_string())
-            .and_then(|mut b| b.commit_from_memory(&mini_onnx()).map_err(|e| e.to_string()))
+            .and_then(|mut b| {
+                b.commit_from_memory(&mini_onnx())
+                    .map_err(|e| e.to_string())
+            })
         });
     match probe {
         Ok(_) => CudaInfo {
@@ -505,7 +508,9 @@ fn find_file(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
     if depth == 0 {
         return None;
     }
-    subdirs.into_iter().find_map(|d| find_file(&d, name, depth - 1))
+    subdirs
+        .into_iter()
+        .find_map(|d| find_file(&d, name, depth - 1))
 }
 
 // ---------------------------------------------------------------------------
@@ -559,7 +564,10 @@ pub fn runtime_dll(root: &Path, writable: &Path) -> Option<PathBuf> {
 /// `onnxruntime.dll` 同名，只有 GPU 构建多出这几个 provider dll。
 fn has_cuda_provider(dll: &Path) -> bool {
     dll.parent()
-        .map(|d| d.join(crate::tools::dll("onnxruntime_providers_cuda")).is_file())
+        .map(|d| {
+            d.join(crate::tools::dll("onnxruntime_providers_cuda"))
+                .is_file()
+        })
         .unwrap_or(false)
 }
 
@@ -753,9 +761,7 @@ fn manual_zip(dirs: &[&Path]) -> Option<PathBuf> {
         let mut zips: Vec<PathBuf> = rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| {
-                p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip"))
-            })
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip")))
             .collect();
         zips.sort();
         if let Some(z) = zips
@@ -1164,7 +1170,10 @@ mod tests {
                 assert!(
                     wire == 0 || wire == 2,
                     "字段 {num} 的 wire type 是 {wire}（整块是 {}）",
-                    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
+                    b.iter()
+                        .map(|x| format!("{x:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 );
                 if wire == 0 {
                     let (v, n) = take_varint(b, i);
@@ -1341,7 +1350,7 @@ mod tests {
         let root = base.join("root");
         let writable = base.join("writable");
         /* ⚠️ 扩展包根是**进程级**的，别的单测可能已经把它指到别处；这一条要的是
-           「根 = 可写目录」这个默认形态，所以显式钉一次。 */
+        「根 = 可写目录」这个默认形态，所以显式钉一次。 */
         crate::artifact::init_ext_base("");
 
         // ① 用户自己放的那份：官方 CPU 包，落在 `<可写>/midi/`（候选里的第一个）
@@ -1362,15 +1371,24 @@ mod tests {
         let provider = capi.join(crate::tools::dll("onnxruntime_providers_cuda"));
 
         // 只有 CPU 包时，就用它（用户没装音轨分离，这就是他能有的最好的一份）
-        assert_eq!(runtime_dll(&root, &writable).as_deref(), Some(cpu.as_path()));
+        assert_eq!(
+            runtime_dll(&root, &writable).as_deref(),
+            Some(cpu.as_path())
+        );
 
         // 多一份 GPU 构建之后，必须改挑 GPU 那份 —— 遮蔽就发生在这一行
         std::fs::write(&provider, b"x").unwrap();
-        assert_eq!(runtime_dll(&root, &writable).as_deref(), Some(gpu.as_path()));
+        assert_eq!(
+            runtime_dll(&root, &writable).as_deref(),
+            Some(gpu.as_path())
+        );
 
         // 把 GPU 那份删掉，退回 CPU 包（别把「没有」当成「出错」）
         std::fs::remove_file(&gpu).unwrap();
-        assert_eq!(runtime_dll(&root, &writable).as_deref(), Some(cpu.as_path()));
+        assert_eq!(
+            runtime_dll(&root, &writable).as_deref(),
+            Some(cpu.as_path())
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1388,9 +1406,9 @@ mod tests {
         let base = std::env::temp_dir().join("vss-midi-dylib-test");
         let _ = std::fs::remove_dir_all(&base);
         /* 仿造真实布局。⚠️ **层级必须与真的一比一**：
-             `…/Lib/site-packages/nvidia/cublas/bin/cublas64_12.dll`   ← 组件（在 nvidia 下面）
-             `…/Lib/site-packages/onnxruntime/onnxruntime.dll`         ← ORT 本体（与 nvidia 同级）
-           夹具多一层或少一层都会让人去改没坏的生产代码。 */
+          `…/Lib/site-packages/nvidia/cublas/bin/cublas64_12.dll`   ← 组件（在 nvidia 下面）
+          `…/Lib/site-packages/onnxruntime/onnxruntime.dll`         ← ORT 本体（与 nvidia 同级）
+        夹具多一层或少一层都会让人去改没坏的生产代码。 */
         let bin = base
             .join("Lib")
             .join("site-packages")
@@ -1410,21 +1428,38 @@ mod tests {
 
         // 从 ORT 本体那个 dll 往上找，应当摸到 cublas\bin，再返回它（要加进 PATH 的就是它）
         let hit = find_dylibs_dir(&cuda, "cublas64_12.dll").expect("应当能找到");
-        assert_eq!(hit, bin, "返回的必须是**装 dll 的那个目录**，不是 nvidia 根");
+        assert_eq!(
+            hit, bin,
+            "返回的必须是**装 dll 的那个目录**，不是 nvidia 根"
+        );
 
         /* ⭐ 四个组件四个目录，各进各的 `bin/`。只传 `nvidia/` 给组件加载一个都命中不了，
         所以这里逐个钉子：谁把 `find_dylibs_dir` 改成只认某一个组件目录，这几条立刻红。 */
         for comp in ["cuda_runtime", "cublas", "cufft", "cudnn"] {
-            std::fs::create_dir_all(bin.parent().unwrap().parent().unwrap().join(comp).join("bin"))
-                .unwrap();
+            std::fs::create_dir_all(
+                bin.parent()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(comp)
+                    .join("bin"),
+            )
+            .unwrap();
         }
         let nvidia = bin.parent().unwrap().parent().unwrap();
         std::fs::write(
-            nvidia.join("cuda_runtime").join("bin").join("cudart64_12.dll"),
+            nvidia
+                .join("cuda_runtime")
+                .join("bin")
+                .join("cudart64_12.dll"),
             b"x",
         )
         .unwrap();
-        std::fs::write(nvidia.join("cufft").join("bin").join("cufft64_11.dll"), b"x").unwrap();
+        std::fs::write(
+            nvidia.join("cufft").join("bin").join("cufft64_11.dll"),
+            b"x",
+        )
+        .unwrap();
         std::fs::write(nvidia.join("cudnn").join("bin").join("cudnn64_9.dll"), b"x").unwrap();
         assert_eq!(
             find_dylibs_dir(&cuda, "cudart64_12.dll"),
@@ -1447,7 +1482,9 @@ mod tests {
         那样写条件恒假、永远找不到。这里用一个 nvidia 树里不存在的名字，且它**只**在 ORT
         自己那一层有 —— 若有人把查找范围放宽到「整个 site-packages」，这条会红。 */
         std::fs::write(
-            cuda.parent().unwrap().join("onnxruntime_providers_shared.dll"),
+            cuda.parent()
+                .unwrap()
+                .join("onnxruntime_providers_shared.dll"),
             b"x",
         )
         .unwrap();
@@ -1499,7 +1536,8 @@ mod tests {
         let mut w = zip::ZipWriter::new(f);
         let opts = zip::write::SimpleFileOptions::default();
         for e in entries {
-            w.start_file(format!("GAME-1.0.3-large-onnx/{e}"), opts).unwrap();
+            w.start_file(format!("GAME-1.0.3-large-onnx/{e}"), opts)
+                .unwrap();
             w.write_all(b"not-really-onnx").unwrap();
         }
         w.finish().unwrap();
@@ -1572,7 +1610,9 @@ mod tests {
             .expect("真包该能解开");
         println!(
             "手放的真包：{} 个文件 / {} 字节，耗时 {:?}",
-            out["files"], out["bytes"], t.elapsed()
+            out["files"],
+            out["bytes"],
+            t.elapsed()
         );
         let v = status(&base, &base);
         assert_eq!(v["models"]["ready"], json!(true), "解完该是就绪：{v}");

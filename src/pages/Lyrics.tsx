@@ -516,7 +516,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             // 否则用户会以为存下来的是无损
             onToast(
                 `歌曲已保存 ${res.name}（${res.level}）` +
-                    (res.downgraded ? '。服务端没有给到该档位，上面是它实际给到的最高档' : ''),
+                (res.downgraded ? '。服务端没有给到该档位，上面是它实际给到的最高档' : ''),
                 'ok',
             )
             setSaved(res.path)
@@ -561,7 +561,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
      * `offline`（网络/风控）只当没查到 —— 网络抖一下就把用户显示成未登录、
      * 还引导他重新登录，是错的（后端就是这么分的，别在这里合并掉）。
      */
-    const refreshAccount = async (opts?: {renew?: boolean}) => {
+    const refreshAccount = async (opts?: { renew?: boolean }) => {
         try {
             const a = await api.lyricsAccount()
             if (a.state === 'ok') {

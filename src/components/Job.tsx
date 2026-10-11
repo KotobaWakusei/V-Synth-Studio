@@ -25,7 +25,7 @@ export function jobStatusTone(status: JobStatus): 'default' | 'ok' | 'warn' | 'e
     return JOB_STATUS[status].tone
 }
 
-export function JobStatusChip({status}: {status: JobStatus}) {
+export function JobStatusChip({status}: { status: JobStatus }) {
     const {tone, label} = JOB_STATUS[status]
     return <Chip tone={tone}>{label}</Chip>
 }

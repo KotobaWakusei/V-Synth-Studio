@@ -161,7 +161,7 @@ pub async fn check() -> Result<Value, String> {
             }
             Err(why) => {
                 /* 镜像答的是正经的 GitHub 错误（404 上游没发过 Release、403 限流）时
-                   就到此为止：再问下一面也是同一个答案，只是换了个出口 IP 去撞限流。 */
+                就到此为止：再问下一面也是同一个答案，只是换了个出口 IP 去撞限流。 */
                 if why.is_error_page() {
                     return Ok(why.into_reply());
                 }
@@ -235,7 +235,7 @@ async fn fetch(url: &str, timeout: Duration) -> Result<Value, Failure> {
     }
 
     /* ⚠️ 判据是**响应体里有没有 `tag_name`**，不是状态码：代理对取不到的路径回
-       一页 HTML（200）是常事，只看状态码会把它当成「上游还没发 Release」。 */
+    一页 HTML（200）是常事，只看状态码会把它当成「上游还没发 Release」。 */
     let v: Value = serde_json::from_str(&text)
         .map_err(|_| Failure::Transport(format!("回的不是 JSON：{}", brief(&text))))?;
     if v["tag_name"].as_str().unwrap_or("").trim().is_empty() {
@@ -381,7 +381,9 @@ mod tests {
         if std::env::var("VSS_REAL_UPDATE_CHECK").is_err() {
             return;
         }
-        let v = check().await.expect("直连与镜像都试过还是连不上时这条测试才算失败");
+        let v = check()
+            .await
+            .expect("直连与镜像都试过还是连不上时这条测试才算失败");
         println!("回包：{}", serde_json::to_string_pretty(&v).unwrap());
         assert_eq!(v["ok"], json!(true), "上游有 Release 时才跑这条：{v}");
         assert_eq!(v["current"], json!(current_version()));
@@ -389,7 +391,10 @@ mod tests {
         assert!(!parse_version(v["latest"].as_str().unwrap()).is_empty());
         assert!(v["url"].as_str().unwrap_or("").contains("github.com"));
         assert!(v["hasUpdate"].is_boolean());
-        assert!(!v["via"].as_str().unwrap_or("").is_empty(), "要说明是谁答的");
+        assert!(
+            !v["via"].as_str().unwrap_or("").is_empty(),
+            "要说明是谁答的"
+        );
         // 真数据上再钉一次「本机比远端新不算更新」：拿本机版本自己跟自己比
         assert!(!is_newer(current_version(), current_version()));
     }
@@ -404,7 +409,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "要联网逐面实测，按需手动跑"]
     async fn real_mirrors_answer_which_ones_proxy_the_api() {
-        println!("直连：{:?}", fetch(LATEST_API, DIRECT_TIMEOUT).await.map(|_| "ok"));
+        println!(
+            "直连：{:?}",
+            fetch(LATEST_API, DIRECT_TIMEOUT).await.map(|_| "ok")
+        );
         for base in API_MIRRORS {
             let url = mirror_url(base, LATEST_API);
             match fetch(&url, MIRROR_TIMEOUT).await {

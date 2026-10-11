@@ -499,8 +499,12 @@ pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
             // upstream's `rms_list[a:b].argmin()` yields an offset that then has
             // to be shifted back. Only the ranges that start at `s` (or that
             // need the `pos` comparison) are kept verbatim.
-            let pos = argmin_range(&rms, i.saturating_sub(SIL_WINDOW_FRAMES), s + SIL_WINDOW_FRAMES + 1)
-                .unwrap_or(s);
+            let pos = argmin_range(
+                &rms,
+                i.saturating_sub(SIL_WINDOW_FRAMES),
+                s + SIL_WINDOW_FRAMES + 1,
+            )
+            .unwrap_or(s);
             let pos_l = argmin_range(&rms, s, s + SIL_WINDOW_FRAMES + 1).unwrap_or(s);
             let pos_r = argmin_range(&rms, i.saturating_sub(SIL_WINDOW_FRAMES), i + 1).unwrap_or(s);
             if s == 0 {
@@ -773,9 +777,7 @@ mod tests {
         let n = sr as usize * 180;
         // `sin` keeps every frame above the -40 dB silence threshold, so the
         // slicer returns the buffer whole.
-        let y: Vec<f32> = (0..n)
-            .map(|i| (i as f32 * 0.05).sin() * 0.5)
-            .collect();
+        let y: Vec<f32> = (0..n).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
         let slices = slice_waveform(&y, sr);
 
         assert!(slices.len() >= 3, "3 分钟要切成至少 3 段：{}", slices.len());
@@ -792,7 +794,11 @@ mod tests {
                 (offset - want_offset).abs() < 1e-9,
                 "第 {i} 段的偏移 {offset} 与已消费的采样点对不上（应为 {want_offset}）"
             );
-            assert_eq!(&y[at..at + chunk.len()], &chunk[..], "第 {i} 段的内容不是原音频的切片");
+            assert_eq!(
+                &y[at..at + chunk.len()],
+                &chunk[..],
+                "第 {i} 段的内容不是原音频的切片"
+            );
             at += chunk.len();
         }
         assert_eq!(at, n, "切完必须正好覆盖整段音频");

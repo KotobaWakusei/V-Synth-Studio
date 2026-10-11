@@ -181,7 +181,11 @@ mod tests {
     fn displayed_version_is_the_manifest_version_plus_beta() {
         let manifest = env!("CARGO_PKG_VERSION");
         let parts: Vec<&str> = manifest.split('.').collect();
-        assert_eq!(parts.len(), 3, "Cargo.toml 的 version 必须是 x.y.z：{manifest}");
+        assert_eq!(
+            parts.len(),
+            3,
+            "Cargo.toml 的 version 必须是 x.y.z：{manifest}"
+        );
         assert!(
             parts
                 .iter()
