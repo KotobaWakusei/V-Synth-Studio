@@ -696,27 +696,36 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
     /**
      * 保存 Cookie。
-     * 从开发者工具整行复制出来的 Cookie 常带换行，而 Cookie 头里不能有换行 —— 折成一行再存。
+     *
+     * ⚠️ **不给这里做任何字符串处理**：清洗（压掉换行 / 制表符、补 `MUSIC_U=` 前缀）在
+     * 后端的 `lyrics::clean_cookie` 一份就够，而且它是**唯一会在用户粘错时报错**的地方。
+     * 前端再折一次行，只会掩盖后端看得见的脏数据（两处规则不一致时更难查）。
+     *
+     * 顺序上先落盘再问账号：`lyricsAccount` 读的是后端那份配置，落盘之前它看不到新值。
      * 留空保存 = 清除（后端语义）。
      */
     const saveCookie = async (raw: string) => {
-        const value = raw.replace(/\s*\r?\n\s*/g, ' ').trim()
-        if (value === MASK) {
+        if (raw.trim() === MASK) {
             onToast('输入框里显示的是占位「已设置」，不是新的 Cookie', 'warn')
             return
         }
         setBusy(true)
         try {
-            await api.saveConfig({neteaseCookie: value})
-            await onRefreshState()
+            const r = await api.saveConfig({neteaseCookie: raw.trim()})
+            // 后端回的是清洗过的值（且已打码）：同步进内存，界面与那份配置对齐
+            syncConfig(r?.config)
             setNeteaseCookie('')
             // 换了凭据就重新判：存了新的当然要摘掉「已失效」，清空了本来也不该留着
             setAuthExpired(false)
-            if (!value) {
+            if (raw.trim()) {
+                await refreshAccount()
+                onToast('Cookie 已保存', 'ok')
+            } else {
                 setNickname('')
+                setVip('')
                 setMsg('已清除网易云的登录态 Cookie，取歌词会退回未登录。', 'warn')
+                onToast('Cookie 已清除', 'ok')
             }
-            onToast(value ? 'Cookie 已保存' : 'Cookie 已清除', 'ok')
         } catch (e) {
             onToast(errText(e), 'err')
         } finally {
@@ -928,7 +937,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
                         <Field
                             label="网易云 Cookie"
-                            hint="保存后不会回显真实值，只会显示「已设置」（输入框保持空白）。留空保存 = 清除。"
+                            hint="粘贴进来带换行 / 制表符也没事：保存时会把空白压成一行再存（粘错形状会明确报错）。只粘 MUSIC_U 一格的值也行，程序会自己补上键名。保存后不会回显真实值，只会显示「已设置」。留空保存 = 清除。"
                         >
                             <TextArea
                                 rows={3}
