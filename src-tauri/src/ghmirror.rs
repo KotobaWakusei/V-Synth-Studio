@@ -49,11 +49,17 @@ const SPEEDS_URL: &str = "https://git.hiwiki.org/data/mirror-speeds.json";
 const LIST_TTL: Duration = Duration::from_secs(6 * 3600);
 /// 实测结果的缓存。一次下载会连着取好几个文件（分卷 6 卷），只该测一次。
 const PICK_TTL: Duration = Duration::from_secs(600);
-/// 实测时取多少字节：够把「握手 + 首字节 + 一段真实吞吐」都算进去，
-/// 又不至于为了挑一面镜像先下几 MB。
-const SAMPLE_BYTES: u64 = 128 * 1024;
-/// 单面镜像的超时。挑镜像卡住比挑错更糟 —— 挑不出来就回官方那条。
-const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
+/// 实测的**时间窗口**：这面镜像在这段时间里送到了多少字节，就是它的名次依据。
+///
+/// ⚠️ 为什么是「固定窗口内收到多少」而不是「收满 N 字节花了多久」：后者会把**慢**判成
+/// **不通**。实测（2026-10，那条 ~0.2 MB/s 的线路上）1 MiB 在慢面上要 5 秒，一超时就
+/// 整面作废 —— 八面全被判死后挑出来的会是**连不上的** github.com 直连，于是「手里有
+/// 一堆可用镜像却一个都没用上」。按窗口收字节，慢面照样有名次（收到多少算多少）。
+/// ⚠️ 它同时解决「按延迟挑」的老问题：原来的 128 KiB 取样主要量的是 RTT，而同一时刻
+/// 各面的实测速率能差 30 倍（0.03–0.95 MB/s）。
+const PROBE_WINDOW: Duration = Duration::from_secs(5);
+/// 窗口内最多收这么多：够看清速率，又不至于为了挑镜子先下十几 MB。
+const PROBE_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// 最多实测几面。名单里常年有几十面，全测既慢又费流量。
 const PROBE_MAX: usize = 8;
 /// 取名单那一次请求的超时。
@@ -238,9 +244,12 @@ fn cached(canonical: &str) -> Option<String> {
 
 /// 并发实测各面，能用的在前。
 ///
-/// ⚠️ 名次是**两级**：先「认不认 Range」，再耗时。认 Range 的镜像才能让「断了几 GB
-/// 接着下」生效；不认的那几面每次续传都得从头写，是次选 —— 但**仍排在 github.com
-/// 前面**：境内只放行某一面镜像的环境里，次选的镜像也比直连强。
+/// ⚠️ 名次是**三级**：先「认不认 `Range`」，再「同一个窗口里收到了多少字节」，最后才是耗时。
+///   认 `Range` 的镜像才能让「断了几 GB 接着下」生效；不认的那几面每次续传都得从头写，
+///   是次选 —— 但**仍排在 github.com 前面**：境内只放行某一面镜像的环境里，次选的镜像
+///   也比连不上的直连强。
+///   ⚠️ 第二级用**同一窗口内的字节数**而不是耗时：窗口内收到更多 = 更快，且慢面不会因为
+///   超时被判死（见 `PROBE_WINDOW`）。
 async fn probe_all(canonical: &str, mirrors: &[Mirror]) -> Vec<String> {
     let client = crate::net::client();
     let futs = mirrors.iter().take(PROBE_MAX).map(|m| {
@@ -252,7 +261,12 @@ async fn probe_all(canonical: &str, mirrors: &[Mirror]) -> Vec<String> {
         .into_iter()
         .flatten()
         .collect();
-    ok.sort_by(|a, b| b.0.ranged.cmp(&a.0.ranged).then(a.0.took.cmp(&b.0.took)));
+    ok.sort_by(|a, b| {
+        b.0.ranged
+            .cmp(&a.0.ranged)
+            .then(b.0.bytes.cmp(&a.0.bytes))
+            .then(a.0.took.cmp(&b.0.took))
+    });
     ok.into_iter().map(|(_, u)| u).collect()
 }
 
@@ -260,28 +274,31 @@ async fn probe_all(canonical: &str, mirrors: &[Mirror]) -> Vec<String> {
 struct Measured {
     /// 服务端认 `Range`（回了 `206`）。
     ranged: bool,
-    /// 从发请求到收完那一段的耗时。
+    /// 窗口内收到了多少字节 —— 这就是它的速率名次。
+    bytes: u64,
+    /// 这一面从发请求到收工花了多久。
     took: Duration,
 }
 
-/// 这一面能不能用（能就顺带把它排进名次）。
+/// 这一面能不能用、以及能跑多快（能就顺带把它排进名次）。
 ///
 /// ⚠️ 三种「看着能用、其实是废的」都要挡掉：
 ///   * **回 `200`**：不认 `Range`。还能下（只是续传要从头写），所以留着当次选；
 ///   * **回 HTML**：有些代理对取不到的路径回一个 200/206 的错误页，body 头写着
 ///     `Content-Type: text/html`。它过得了「非空 body」那一关，却要等到解压才炸；
-///   * **不真读 body**：有的代理这时才去连上游，只看响应头会把「握手很快、
-///     其实取不到东西」的那面排成第一名。
+///   * **一个字节都没到**：有的代理这时才去连上游（或者根本没有这个文件）。
 async fn probe_one(client: &reqwest::Client, url: &str) -> Option<Measured> {
+    use futures_util::StreamExt;
     let t = Instant::now();
     let res = client
         .get(url)
         .header(
             RANGE,
-            HeaderValue::from_str(&format!("bytes=0-{}", SAMPLE_BYTES - 1))
-                .unwrap_or(HeaderValue::from_static("bytes=0-131071")),
+            HeaderValue::from_str(&format!("bytes=0-{}", PROBE_MAX_BYTES - 1))
+                .unwrap_or(HeaderValue::from_static("bytes=0-2097151")),
         )
-        .timeout(PROBE_TIMEOUT)
+        // 只要响应头：body 的读取由下面那个窗口管，别让请求级超时把它提前掐掉
+        .timeout(PROBE_WINDOW + Duration::from_secs(3))
         .send()
         .await
         .ok()?;
@@ -298,11 +315,30 @@ async fn probe_one(client: &reqwest::Client, url: &str) -> Option<Measured> {
     if html {
         return None;
     }
-    if res.bytes().await.map(|b| b.is_empty()).unwrap_or(true) {
+
+    /* 读满一个**固定窗口**（或收够 PROBE_MAX_BYTES 就提前收工）：拿到多少字节就是多少。
+       ⚠️ 别改成「读完整个 body」：不认 Range 的镜像会回一整个 966 MB，那样挑一面镜子
+       就要几分钟、白烧几 GB 流量。 */
+    let deadline = Instant::now() + PROBE_WINDOW;
+    let mut bytes: u64 = 0;
+    let mut stream = res.bytes_stream();
+    while bytes < PROBE_MAX_BYTES {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, stream.next()).await {
+            Ok(Some(Ok(chunk))) => bytes += chunk.len() as u64,
+            // 超时 / 流断了 / 到末尾：都按「收到了这么多」算
+            _ => break,
+        }
+    }
+    if bytes == 0 {
         return None;
     }
     Some(Measured {
         ranged,
+        bytes,
         took: t.elapsed(),
     })
 }
@@ -501,5 +537,88 @@ mod tests {
         let picked = pick(url).await;
         println!("挑中：{picked}");
         assert!(picked.contains("models.zip"));
+    }
+
+    /// 从这面镜像拉 `want` 字节，返回真拿到多少（失败/超时 0）。
+    ///
+    /// ⚠️ **收够 `want` 就断开**：不认 `Range` 的镜像会回一整个文件（966 MB），
+    /// 由着它读完，量一次要几分钟、还白烧几 GB 流量。
+    async fn sample_bytes(url: &str, want: u64) -> u64 {
+        use futures_util::StreamExt;
+        let req = crate::net::client()
+            .get(url)
+            .header(
+                RANGE,
+                HeaderValue::from_str(&format!("bytes=0-{}", want - 1))
+                    .unwrap_or(HeaderValue::from_static("bytes=0-0")),
+            )
+            .timeout(Duration::from_secs(30));
+        let res = match req.send().await {
+            Ok(r) => r,
+            Err(_) => return 0,
+        };
+        if !(200..300).contains(&res.status().as_u16()) {
+            return 0;
+        }
+        let mut n = 0u64;
+        let mut stream = res.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(c) => {
+                    n += c.len() as u64;
+                    if n >= want {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        n
+    }
+
+    /// **每一面都真拉一大段**，报持续速率 —— 名单里谁被限速、限到多少，只有这么量。
+    ///
+    /// 为什么不能只看 `pick` 那次实测：它取 128 KiB，那个量级量的是**延迟**（RTT + 首字节），
+    /// 而几 GB 的包在意的是**持续**速率。两面延迟都是 100 ms 的镜像，一个能跑 20 MB/s、
+    /// 另一个被限到 1 MB/s，128 KiB 那一下分不出来。
+    ///
+    ///     $env:VSS_MIRROR_BENCH_MB='8'      # 每面拉多少（默认 8 MiB）
+    ///     $env:VSS_MIRROR_BENCH_URL='...'   # 拿哪个资产测（默认 runtime.z01）
+    ///     cargo test --lib real_mirror_throughput -- --ignored --nocapture
+    ///
+    /// ⚠️ 一面接一面地测（不并发）：并发测出来的名次是「谁抢带宽厉害」，不是「谁能跑多快」。
+    #[tokio::test]
+    #[ignore = "要联网把每一面都拉一段，按需手动跑"]
+    async fn real_mirror_throughput_ranks_live_mirrors() {
+        let url = std::env::var("VSS_MIRROR_BENCH_URL").unwrap_or_else(|_| {
+            "https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules/runtime.z01"
+                .to_string()
+        });
+        let mb: u64 = std::env::var("VSS_MIRROR_BENCH_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let want = mb * 1024 * 1024;
+        let list = mirror_list().await;
+        println!("候选 {} 面，每面拉 {mb} MiB（一面接一面）：", list.len());
+
+        let mut rows: Vec<(f64, String)> = Vec::new();
+        for m in &list {
+            let u = proxy_url(m, &url);
+            let t = Instant::now();
+            let n = sample_bytes(&u, want).await;
+            let secs = t.elapsed().as_secs_f64();
+            match n {
+                n if n > 0 => rows.push((
+                    n as f64 / 1048576.0 / secs,
+                    format!("{:7.2} MB/s  {n:>9} B  {u}", n as f64 / 1048576.0 / secs),
+                )),
+                _ => rows.push((0.0, format!("  失败/超时            {u}"))),
+            }
+        }
+        rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        for (_, line) in &rows {
+            println!("  {line}");
+        }
     }
 }
