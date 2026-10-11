@@ -790,6 +790,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                         key={`${asId(s.id) || i}`}
                                         type="button"
                                         className="lyrics-result"
+                                        /* 选中的那条留个记号：同名歌在结果里往往有十几个版本，
+                                           不回显「现在预览的是哪一条」时，点错一个也看不出来 */
+                                        data-current={current?.source !== 'file' && asId(current?.id) === asId(s.id)}
                                         onClick={() => void loadLyric(s.id!, s.playable)}
                                     >
                                         <Icon name="music" size={15}/>
