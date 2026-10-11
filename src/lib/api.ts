@@ -1050,6 +1050,13 @@ export interface UpdateCheck {
     prerelease?: boolean
     /** 那条发布带的附件文件名 */
     assets?: string[]
+    /**
+     * 这一次是**谁答的**：`GitHub 直连`、或镜像的域名（如 `https://gh-proxy.com`）。
+     *
+     * ⚠️ 直连不通时后端会自动改走镜像（境内常见），界面要把这件事说出来 ——
+     * 用户有权知道版本信息是第三方代答的。
+     */
+    via?: string
 }
 
 /**

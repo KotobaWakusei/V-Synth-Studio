@@ -770,6 +770,13 @@ function About({
                 </div>
                 {updateErr && <p className="hint">{updateErr}</p>}
                 {update?.ok === false && <p className="hint">{update.error}</p>}
+                {/* 直连不通时后端会自动改走镜像：这件事要说出来，用户有权知道
+                    版本信息是第三方代答的（值由后端给，见 `update.rs` 的 `via`） */}
+                {update?.ok && update.via && update.via !== 'GitHub 直连' && (
+                    <p className="hint">
+                        {t('GitHub 直连不通，这次是经镜像代查的')}：{update.via}
+                    </p>
+                )}
                 {update?.ok && update.hasUpdate && (
                     <>
                         <Finding level="info" title={`${t('有新版本')}：${update.latest ?? ''}`}>
