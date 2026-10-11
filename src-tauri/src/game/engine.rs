@@ -496,3 +496,61 @@ pub const MODEL_FILES: [&str; 3] = ["encoder.onnx", "segmenter.onnx", "estimator
 **不许改成 `d.is_dir()`**。要改那条语义请去 `artifact::locate` 改，别在这里加壳。
 ⚠️ 「绿色版两层同路径、判层只能比绝对路径」那条也仍然有效，见
 `midi_transcribe::status` 的 `origin` 与 `clear_downloads` 的注。 */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::algo;
+    use std::path::PathBuf;
+
+    /// 真模型上的回归：`encoder.onnx` 的 rope 表是冻结到 **5000 帧**的初始化张量
+    /// （`…layers.N.attn.attn.rope.pe_cos/pe_sin` 形状 `[1, 5000, 32]`），比它长的
+    /// 输入死在那条应用 rope 的 Mul 节点上，ORT 的原话是
+    /// `Attempting to broadcast an axis by a dimension other than 1. 5000 by 6000`。
+    /// 而切片器只在**静音处**切 —— 一段连续 3 分钟的人声（没有静音）原来会把整段
+    /// 喂给 encoder，于是「部分音频扒谱必失败」，报错还看不出跟长度有关。
+    ///
+    /// 判定必须落在**真实推理**上：`algo` 侧那条单测只保证切出来的片不超限，
+    /// 5000 这个数字是图里的常量，两边对不上的话只有跑一遍图才知道。
+    ///
+    ///     $env:VSS_MIDI_MODELS='%APPDATA%\com.qingmu.vocalworkstation\game\models'
+    ///     cargo test --lib slices_run_through_the_real_encoder -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn slices_run_through_the_real_encoder() {
+        let Some(models) = std::env::var_os("VSS_MIDI_MODELS").map(PathBuf::from) else {
+            eprintln!("跳过：没有设 VSS_MIDI_MODELS（见这个测试的注释）");
+            return;
+        };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let Some(dll) = crate::midi_transcribe::runtime_dll(&root, &root.join("data")) else {
+            eprintln!("跳过：找不到 onnxruntime（tools/onnxruntime/）");
+            return;
+        };
+
+        // 3 分钟、每帧都高于 -40 dB 的正弦：切片器判定「整段没有静音」，会原样交给 encoder
+        let sr = algo::SAMPLE_RATE as usize;
+        let wave: Vec<f32> = (0..sr * 180).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let opts = Options {
+            // 1 步就够：这里验的是 encoder 的形状，不是 D3PM 的采样质量
+            steps: 1,
+            threads: 4,
+            device: Device::Cpu,
+            ..Options::default()
+        };
+        let report = transcribe(&models, &dll, &wave, &opts, &|_, _| {})
+            .expect("3 分钟连续音频该能扒完（切片器必须把它切到 encoder 的 rope 上限之下）");
+        assert!(
+            report.slices.len() > 1,
+            "3 分钟必须有多次切片，实际 {}",
+            report.slices.len()
+        );
+        for (offset, n) in &report.slices {
+            assert!(
+                *n <= algo::MAX_ENCODER_SAMPLES,
+                "offset={offset} 的切片有 {n} 个采样点，超过 encoder 的 {}",
+                algo::MAX_ENCODER_SAMPLES
+            );
+        }
+    }
+}
