@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 ///
 /// 显示值 = `Cargo.toml` 的版本 + `beta`。后缀只能加在**这里**：
 /// Windows Installer 的 `ProductVersion` 只吃纯数字 `x.y.z`，所以 `Cargo.toml`
-/// 必须是 `1.3.2`，而界面显示与安装包文件名要的是 `1.3.2beta`（文件名那半在
-/// CI 里补，见 `.github/workflows/build-msi.yml`）。
+/// 必须是纯数字，而界面显示与安装包文件名要的是 `1.4.0beta`（文件名那半在
+/// CI 里补，见 `tools/rename-bundles-beta.mjs`）。
 ///
 /// ⚠️ **别把整个版本号写成字面量**：那样版本号散成多份、每份都要人记住同步，
 /// 而漏掉任何一处的后果都不一样（界面显示的版本、Cargo.lock 与 Cargo.toml 的

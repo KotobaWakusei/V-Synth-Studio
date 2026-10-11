@@ -46,12 +46,29 @@ function skipped(rel) {
 
 const say = (msg = '') => process.stdout.write(msg + '\n')
 
-/** workflow 里 `node tools/xxx.mjs` 提到的脚本要真的在。 */
+/**
+ * 文本里提到的 `tools/` 下的脚本要真的在。
+ *
+ * 两种引用都要认：
+ *   · workflow 里的 `node tools/xxx.mjs`（shell 行）；
+ *   · `tools/*.mjs` 里的 `tools/xxx.ps1` / `tools/xxx.mjs`（拼在路径里的，比如
+ *     `smoke-package.mjs` 调 `msi-file-table.ps1`）—— 只在 workflow 里找会漏掉这一类。
+ *
+ * ⚠️ 只认「`tools/` + 文件名 + 已知后缀」这种完整形状，别用宽泛的 `tools/[\w./-]+`：
+ *    那样会把 `tools/ffmpeg/bin/ffmpeg` 这类**产物落点**也当脚本去查，本地没补齐时必然误报。
+ */
 function checkScripts(text, name) {
   const bad = []
-  const seen = new Set([...text.matchAll(/node\s+(tools\/[\w./-]+\.mjs)/g)].map((m) => m[1]))
+  /* ⚠️ 先剥掉注释再找引用：注释里为了说明会写出 `tools/xxx.ps1` 这种占位示例，
+     照着去 existsSync 必然误报。块注释（JSDoc 的 `*` 续行也在内）与整行 `#` / `//`
+     都要剥；行内 `//` 不动 —— 分不清后面是路径还是正文。 */
+  const code = text.replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((l) => !/^\s*(#|\/\/)/.test(l)).join('\n')
+  const seen = new Set(
+    [...code.matchAll(/(?:^|[\s'"`(/])(tools\/[\w-]+(?:\/[\w-]+)*\.(?:mjs|ps1|sh))/gm)].map((m) => m[1]),
+  )
   for (const rel of [...seen].sort()) {
-    if (!fs.existsSync(path.join(HERE, rel))) bad.push(`${name} 调用了不存在的脚本：${rel}`)
+    if (!fs.existsSync(path.join(HERE, rel))) bad.push(`${name} 引用了不存在的脚本：${rel}`)
   }
   return bad
 }
@@ -132,6 +149,12 @@ function main() {
     const text = fs.readFileSync(wf, 'utf-8')
     const name = path.basename(wf)
     bad = bad.concat(checkScripts(text, name), checkRepoPaths(text, name))
+  }
+  // `tools/*.mjs` 之间也会互相引用（比如冒烟入口调 `.ps1`）—— 那条路径不在 workflow 里，
+  // 上面那圈扫不到。
+  for (const f of fs.readdirSync(path.join(HERE, 'tools')).filter((n) => n.endsWith('.mjs')).sort()) {
+    const text = fs.readFileSync(path.join(HERE, 'tools', f), 'utf-8')
+    bad = bad.concat(checkScripts(text, `tools/${f}`))
   }
 
   if (bad.length) {
