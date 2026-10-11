@@ -59,7 +59,8 @@ const PICK_TTL: Duration = Duration::from_secs(600);
 /// 各面的实测速率能差 30 倍（0.03–0.95 MB/s）。
 const PROBE_WINDOW: Duration = Duration::from_secs(5);
 /// 窗口内最多收这么多：够看清速率，又不至于为了挑镜子先下十几 MB。
-const PROBE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// 8 面各收满也只有 8 MB —— 对 364 MB 的包是 2%、对 4.9 GB 的分卷包是零头。
+const PROBE_MAX_BYTES: u64 = 1024 * 1024;
 /// 最多实测几面。名单里常年有几十面，全测既慢又费流量。
 const PROBE_MAX: usize = 8;
 /// 取名单那一次请求的超时。
@@ -252,7 +253,8 @@ fn cached(canonical: &str) -> Option<String> {
 ///   超时被判死（见 `PROBE_WINDOW`）。
 async fn probe_all(canonical: &str, mirrors: &[Mirror]) -> Vec<String> {
     let client = crate::net::client();
-    let futs = mirrors.iter().take(PROBE_MAX).map(|m| {
+    let picked = shortlist(mirrors);
+    let futs = picked.iter().map(|m| {
         let url = proxy_url(m, canonical);
         async move { probe_one(client, &url).await.map(|m| (m, url)) }
     });
@@ -268,6 +270,33 @@ async fn probe_all(canonical: &str, mirrors: &[Mirror]) -> Vec<String> {
             .then(a.0.took.cmp(&b.0.took))
     });
     ok.into_iter().map(|(_, u)| u).collect()
+}
+
+/// 从名单里挑出这次要实测的那几面。
+///
+/// ⚠️ **不是「按站长测出来的速度取前 8」**。那个速度是**他的机器**到各镜像测的，和我们
+/// 这边经常对不上：实测（2026-10）他那份排在第 10 名开外的 `gh.acmsz.top` 反而是这边最快
+/// 的一面（1.7–2.1 MB/s），而按他的名次取前 8 根本轮不到它。
+/// 所以：前 4 面按他的名次（他的测量多少有点信息量），其余 4 面**在整张名单上等距取**
+/// —— 靠后但可能很快的镜像也得有机会。
+fn shortlist(list: &[Mirror]) -> Vec<Mirror> {
+    const HEAD: usize = 4;
+    let mut picked: Vec<Mirror> = list.iter().take(PROBE_MAX.min(HEAD)).cloned().collect();
+    let rest: Vec<&Mirror> = list.iter().skip(picked.len()).collect();
+    let want = PROBE_MAX.saturating_sub(picked.len());
+    if want == 0 || rest.is_empty() {
+        return picked;
+    }
+    for i in 0..want {
+        // 等距：want == 1 时取第一个，否则首尾都取到（名单末尾那面也测一次）
+        let idx = if want == 1 {
+            0
+        } else {
+            i * (rest.len() - 1) / (want - 1)
+        };
+        picked.push(rest[idx].clone());
+    }
+    picked
 }
 
 /// 一面的实测结果。
@@ -522,6 +551,32 @@ mod tests {
         assert!(!m.ranged, "回 200 是不认 Range，要排到认 Range 的后面");
     }
 
+    /// 短名单：前 4 面按名单顺序，其余等距铺满整张名单 —— 靠后但可能很快的镜像
+    /// （实测就有这种）不能被「站长的前 8 名」挡住。
+    #[test]
+    fn the_shortlist_spreads_across_the_whole_list() {
+        let list: Vec<Mirror> = (0..12)
+            .map(|i| Mirror {
+                base: format!("https://m{i}.example/"),
+                path_prefix: "https://github.com".to_string(),
+            })
+            .collect();
+        let picked = shortlist(&list);
+        assert_eq!(picked.len(), PROBE_MAX, "该测 {PROBE_MAX} 面");
+        // 前 4 面按顺序
+        for i in 0..4 {
+            assert_eq!(picked[i].base, list[i].base);
+        }
+        // 其余等距，且**名单末尾那面也在内**（最容易被漏掉的那一头）
+        assert_eq!(picked.last().unwrap().base, list.last().unwrap().base);
+        let bases: Vec<&str> = picked.iter().map(|m| m.base.as_str()).collect();
+        let unique: std::collections::HashSet<&&str> = bases.iter().collect();
+        assert_eq!(unique.len(), bases.len(), "短名单里不该有重复：{bases:?}");
+        // 名单比 PROBE_MAX 短时：全都测，不越界
+        let few = shortlist(&list[..3]);
+        assert_eq!(few.len(), 3);
+    }
+
     /// 真去实测一遍并打印排名 —— 镜像名单会烂，这是「现在哪几面还能用」的现场证据。
     ///
     ///     cargo test --lib real_mirror_pick -- --ignored --nocapture
@@ -530,7 +585,7 @@ mod tests {
     async fn real_mirror_pick_ranks_live_mirrors() {
         let url = "https://github.com/QingMu39-Gao/V-Synth-Studio/releases/download/modules/models.zip";
         let list = mirror_list().await;
-        println!("候选 {} 面（只实测前 {PROBE_MAX} 面）", list.len());
+        println!("名单 {} 面，短名单实测 {PROBE_MAX} 面：", list.len());
         for u in probe_all(url, &list).await {
             println!("  ✓ {u}");
         }
