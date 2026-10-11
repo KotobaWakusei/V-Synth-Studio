@@ -80,14 +80,14 @@
 镜像回来的字节同样要过大小核对与解压时的逐条 CRC。想强制走直连就设 `VSS_GH_MIRROR=off`。
 
 **ONNX Runtime**：本功能用 `ort` crate（MIT）以 `load-dynamic` 方式**在运行时加载**
-`onnxruntime.dll`，不静态链接、不随包分发这个 dll。两个来源：
+`onnxruntime.dll`，不静态链接它；那份 dll **随包分发**（`tools/onnxruntime/`，构建时由
+`tools/fetch_tools.mjs` 从 Microsoft 官方 release 取 `onnxruntime-win-x64-1.23.2.zip`，
+MIT，再随 `bundle.resources` 打进安装包）——所以**运行期不需要下任何运行库**。
 
-1. **优先借用**用户已经装好的音轨分离运行时里的那份
-   （`app/data/svsep/runtime/Lib/site-packages/onnxruntime/capi/onnxruntime.dll`，ORT 1.23.2，MIT）；
-2. 找不到时，用户可在扒谱页点「下载运行库」，从 Microsoft 官方 release 取
-   `onnxruntime-win-x64-1.23.2.zip`（MIT）。
-   ⚠️ 这一条**没有**改托管 —— 它取的是微软自己 release 上那份；而「release 资产境内下不动」
-   这件事已由镜像层统一解决（走 `github.com/...` 的下载都会自动挑镜像，见上一条）。
+找不到随机那份时按能力借用户机器上已有的（`midi_transcribe::runtime_dll`）：
+优先带 `onnxruntime_providers_cuda.dll` 的那份（**音轨分离运行时**里那份是 GPU 构建），
+其次是 `<可写>/midi` 或 DirectML 加速包里的。⚠️ 借用顺序**不是**候选顺序 —— 按顺序挑会让
+一份 CPU 构建把后面那份能跑 CUDA 的遮蔽掉，GPU 那一格就再也点不亮。
 
 ---
 
