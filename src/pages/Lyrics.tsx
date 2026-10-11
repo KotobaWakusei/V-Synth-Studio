@@ -1076,7 +1076,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
                         <Field
                             label="下载音质"
-                            hint="档位是「上限」而不是承诺：服务端给不到就按它能拿到的最高档下，并如实写明实际存下来的是哪一档（求无损只给 320K 时不会假装成功）。无损 / Hi-Res 需要对应会员，未登录最高 128K。"
+                            hint="档位是「上限」而不是承诺：服务端给不到就按它能拿到的最高档下，并如实写明实际存下来的是哪一档（求无损只给 320K 时不会假装成功）。无损 / Hi-Res 需要对应会员，未登录最高 128K。会员曲 `VIP` / `付费专辑` 只给试听片段，后端会拦下来。"
                         >
                             <GlassSegmentedControl
                                 aria-label={t("下载音质")}
@@ -1084,6 +1084,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                     {value: 'auto', label: '自动'},
                                     {value: 'lossless', label: '无损'},
                                     {value: 'exhigh', label: '320K'},
+                                    {value: 'higher', label: '192K'},
                                     {value: 'standard', label: '128K'},
                                 ]}
                                 value={quality}

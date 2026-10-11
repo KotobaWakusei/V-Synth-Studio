@@ -618,9 +618,10 @@ fn write_file(dest: &Path, bytes: &[u8]) -> Result<(), String> {
 /// 下载档位。**档位是上限，不是承诺**：服务端会静默降级，实际拿到哪一档由回包的
 /// `level` 决定，并如实报给用户。
 ///
-/// 实测（未登录、免费歌，`player/url/v1`）：求 `standard` / `higher` / `exhigh` 分别回
-/// 128 / 192 / 320 kbps；求 `lossless` / `hires` **也回 url**，但 `level` 仍写 `exhigh`、
-/// `type` 仍写 `mp3`。所以**只看 `url` 非空会把 320 kbps 当成无损**，必须比对等级。
+/// 实测（未登录、免费歌，`player/url/v1` + `encodeType=flac`）：求 `standard` / `higher` /
+/// `exhigh` 分别回 128 / 192 / 320 kbps；求 `lossless` / `hires` **也回 url**，但 `level`
+/// 仍写 `exhigh`、`type` 仍写 `mp3`。所以**只看 `url` 非空会把 320 kbps 当成无损**，
+/// 必须比对等级（`encodeType` 本身也按档位分，见 `encode_type`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quality {
     /// 不设上限：直接求最高档，服务端给到什么算什么。
@@ -654,10 +655,19 @@ impl Quality {
         }
     }
 
-    /// **无损及以上必须用 `flac` 求**：带 `mp3` 时服务端不会给 flac 流，
-    /// 这一条漏了就永远拿不到无损。
+    /// 请求的编码容器。**只有无损及以上能用 `flac`**：带 `mp3` 求 `lossless` 时
+    /// 服务端不会给 flac 流，这一条漏了就永远拿不到无损。
+    ///
+    /// ⚠️ **反过来也成立，而且是 320K / 128K 档的坑**：`level=exhigh|higher|standard`
+    /// 配 `encodeType=flac` 时服务端会把「本档的 mp3」换成一档 **flac** 回给有权益的账号
+    /// —— 实测黑胶账号求 `exhigh` 得到 `level=exhigh, br=320000, type=mp3`，一换 `flac`
+    /// 就变成同一首歌的 `lossless`。那样选「320K」下回来的既不是 320K，`downgraded`
+    /// 也报不出来（`lossless` 比请求高，不算降级），用户拿到的和界面上说的不是一回事。
     fn encode_type(self) -> &'static str {
-        if self.rank() >= 3 { "flac" } else { "mp3" }
+        match self {
+            Quality::Hires | Quality::Lossless => "flac",
+            Quality::Auto | Quality::Exhigh | Quality::Higher | Quality::Standard => "mp3",
+        }
     }
 
     /// 档位高低，只用于比较（与 kbps 不是一回事：`Auto` 代表「不设上限」）。
@@ -2240,8 +2250,12 @@ mod tests {
         // Auto 从最高档起要，服务端按账号权益往下给
         assert_eq!(Quality::Auto.level(), "hires");
 
-        // 无损及以上必须用 flac 求，否则永远拿不到 flac 流
+        // 无损及以上必须用 flac 求，否则永远拿不到 flac 流；
+        // ⚠️ 反向同样成立：exhigh / higher / standard 配 flac 会拿到**更高**一档的 flac，
+        // 界面上写「320K」而下回来的是无损，且 downgraded 报不出来
+        assert_eq!(Quality::Auto.encode_type(), "mp3");
         assert_eq!(Quality::Standard.encode_type(), "mp3");
+        assert_eq!(Quality::Higher.encode_type(), "mp3");
         assert_eq!(Quality::Exhigh.encode_type(), "mp3");
         assert_eq!(Quality::Lossless.encode_type(), "flac");
         assert_eq!(Quality::Hires.encode_type(), "flac");
