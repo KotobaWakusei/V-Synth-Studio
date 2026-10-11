@@ -29,6 +29,8 @@ const SECTIONS = [
     {id: 'wallpaper', label: '壁纸'},
     {id: 'paths', label: '路径'},
     {id: 'tools', label: '外部工具'},
+    /* 「赞助」在「关于」之前：它要的是被看见（关于那一栏是署名与致谢，看到最后才轮到） */
+    {id: 'sponsor', label: '赞助'},
     {id: 'about', label: '关于'},
 ] as const
 
@@ -127,6 +129,7 @@ export function Settings({
                 {section === 'tools' && (
                     <Tools state={state} onRefreshState={onRefreshState} onToast={onToast}/>
                 )}
+                {section === 'sponsor' && <Sponsor/>}
                 {section === 'about' && (
                     <About state={state} onRefresh={reload} onNavigate={onNavigate} onToast={onToast}/>
                 )}
@@ -648,6 +651,40 @@ const LICENSES: { feature: string; upstream: string; href?: string; license: str
         how: '汉字读音数据来源',
     },
 ]
+
+/**
+ * 赞助那一栏：一段话 + 一张赞赏码。
+ *
+ * 图片在 `public/img/sponsor.jpg`，由 Vite 原样拷进 `dist/`（`public/` 下的东西
+ * 不走打包，路径就是 `/img/sponsor.jpg`）。
+ *
+ * ⚠️ **二维码必须保持白底**：它是给手机摄像头扫的，跟着暗色主题走会扫不出来 ——
+ * 和 B 站扫码登录那块 `.qr-box` 同一条规矩（样式在 `Settings.css` 的 `.sponsor-code`）。
+ *
+ * 文案是作者的话，**不翻译**：与「关于作者」里那几段同一条规矩 —— 第一人称说给
+ * 赞助者的句子，用机器译成三种语言反而怪。
+ */
+function Sponsor() {
+    return (
+        <Panel>
+            <PanelHead title="赞助" desc="扫码赞赏 —— 记得备注 ID，会同步到「关于」里的感谢名单"/>
+            <div className="sponsor">
+                <p className="sponsor-words">
+                    软件的开发与运营几乎得靠你们赞助了。作者只是个学生，拿不出太多钱为爱发电，抱歉。
+                    有能力的希望可以赞助一下，记得备注 ID，会同步到感谢名单，谢谢！
+                </p>
+                <img
+                    className="sponsor-code"
+                    src="/img/sponsor.jpg"
+                    alt="赞赏码"
+                    width={244}
+                    height={244}
+                />
+                <p className="hint">右键（或长按）保存图片，用微信 / 支付宝扫一扫。</p>
+            </div>
+        </Panel>
+    )
+}
 
 function About({
                    state,

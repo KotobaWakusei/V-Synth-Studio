@@ -61,6 +61,34 @@
 .lic-upstream.upstream {
     margin: 0;
 }
+/* ── 赞助（pages/Settings.tsx）────────────────────────────────────────
+   一段话 + 一张赞赏码。二维码**必须白底**：它是给手机摄像头扫的，跟着暗色主题
+   走会扫不出来（和 B 站扫码登录那块 `.qr-box` 同一条规矩）。 */
+.sponsor {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--lg-space-3);
+    text-align: center;
+}
+
+.sponsor-words {
+    /* 一行行长一点更好读：正文宽度限制交给 `max-width`，而不是让它在整块面板里拉满 */
+    max-width: 46ch;
+    margin: 0;
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: var(--lg-label-secondary);
+}
+
+.sponsor-code {
+    /* 白底 + 留白：二维码四周不能贴到面板边缘，扫的时候找不到定位角 */
+    padding: var(--lg-space-3);
+    border-radius: var(--lg-radius-m);
+    background: #fff;
+    border: 1px solid var(--lg-separator);
+}
+
 /* ── 设置页：左分节 + 右内容 ─────────────────────────────────── */
 .settings {
     display: flex;
