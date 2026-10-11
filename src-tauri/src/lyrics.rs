@@ -1631,8 +1631,10 @@ fn decode_text(bytes: &[u8]) -> (String, &'static str) {
 
 /// GBK(936) → UTF-8。走系统 API，不引编码库。
 ///
-/// windows-sys 本来就在依赖里（注册表、进程管理在用），这里只多开一个
-/// `Win32_Globalization` feature —— 同一份 kernel32 绑定，不增加体积。
+/// 三端都用系统自带的转换器，不为一份 GBK 表引第三个 crate：
+/// Windows 是 kernel32 的 `MultiByteToWideChar`（`windows-sys` 已在依赖里，
+/// 只多开一个 `Win32_Globalization` feature），unix 是 libc 的 `iconv`
+/// （`libc` 也已在依赖里）。
 #[cfg(windows)]
 fn gbk_to_string(bytes: &[u8]) -> Option<String> {
     use windows_sys::Win32::Globalization::MultiByteToWideChar;
@@ -1655,10 +1657,34 @@ fn gbk_to_string(bytes: &[u8]) -> Option<String> {
     Some(String::from_utf16_lossy(&buf))
 }
 
-#[cfg(not(windows))]
-fn gbk_to_string(_bytes: &[u8]) -> Option<String> {
-    // ponytail: 非 Windows 只认 UTF-8；真要在那边读 GBK 就换个纯 Rust 编码库
-    None
+#[cfg(unix)]
+fn gbk_to_string(bytes: &[u8]) -> Option<String> {
+    /* macOS 的 libc 把 `iconv_*` 标了 deprecated（它不想让 std 静态链接 libiconv），
+       而这里正是有意用它 —— 不引 crate 的代价就是这几个符号。 */
+    #[allow(deprecated)]
+    unsafe {
+        let cd = libc::iconv_open(c"UTF-8".as_ptr(), c"GBK".as_ptr());
+        if cd == -1isize as libc::iconv_t {
+            return None;
+        }
+        /* UTF-8 每字符最多 4 字节、GBK 每字符 2 字节，4× 输入再加余量必够 ——
+           不够的话 iconv 会回 E2BIG，那按下面 `rc == usize::MAX` 当失败。 */
+        let cap = bytes.len() * 4 + 4;
+        let mut out = vec![0u8; cap];
+        let mut in_ptr = bytes.as_ptr() as *mut libc::c_char;
+        let mut in_left = bytes.len();
+        let mut out_ptr = out.as_mut_ptr() as *mut libc::c_char;
+        let mut out_left = cap;
+        let rc = libc::iconv(cd, &mut in_ptr, &mut in_left, &mut out_ptr, &mut out_left);
+        libc::iconv_close(cd);
+        /* `in_left != 0` = 中途撞上非法序列：宁可整个判失败（调用方回退有损解码、
+           让用户看到乱码），也不要返回「前半截对、后半截错」的文本。 */
+        if rc == usize::MAX || in_left != 0 {
+            return None;
+        }
+        out.truncate(cap - out_left);
+        String::from_utf8(out).ok()
+    }
 }
 
 /// 把 LRC 拆成（原文, 译文）。认不出来就整份当原文、译文给空串 —— 不报错、不瞎猜。
@@ -2071,7 +2097,6 @@ mod tests {
         assert_eq!(text, "[00:01.00]晴天\n");
     }
 
-    #[cfg(windows)]
     #[test]
     fn decode_falls_back_to_gbk() {
         // GBK(936) 的「晴天」是 C7 E7 CC EC —— 不是合法 UTF-8，只能靠 GBK 才读得对
@@ -2082,6 +2107,17 @@ mod tests {
         let (text, enc) = decode_text(bytes);
         assert_eq!(enc, "gbk");
         assert_eq!(text, "[00:01.00]晴天\n");
+    }
+
+    /// 非法字节序列整条判失败（回退有损解码、让用户看到乱码），不返回「前半截对」的文本。
+    ///
+    /// 判据是 `gbk_to_string` 直接回 `None`：0xFF 在 GBK 里不可能是首字节，iconv 会在这里
+    /// 报 EILSEQ。若实现只按「iconv 没报错」判成功，就会把 `[00:01.00]` 之后的乱码当正文。
+    #[test]
+    fn invalid_gbk_is_rejected_whole() {
+        assert_eq!(gbk_to_string(&[0xff, 0xff]), None);
+        // 合法 UTF-8 不该走这条路径，但直接喂给 gbk_to_string 时它按 GBK 解得对
+        assert_eq!(gbk_to_string(b"abc"), Some("abc".to_string()));
     }
 
     #[test]
