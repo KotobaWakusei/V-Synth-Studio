@@ -9,7 +9,7 @@
 //! 前端把打码后的占位串原样提交回来时，`set_config` 会跳过它 —— 不会出现
 //! 「真值被占位串覆盖」这种反向事故。
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::Cmd;
 
@@ -18,6 +18,64 @@ use super::Cmd;
 pub async fn get_config(st: super::St<'_>) -> Cmd {
     let cfg = st.config_snapshot();
     Ok(serde_json::json!({ "config": super::config_file::mask_secrets(&cfg) }))
+}
+
+/// 盘上那份网易云 Cookie 若是脏的（带空白 / 换行），就地洗干净并落盘一次。
+///
+/// 返回**是否改过**。清洁的值（含空串）不动盘：这条会跟着每次 `AppState::new` 跑。
+pub(crate) fn normalize_netease_cookie(cfg: &mut Value) -> bool {
+    let Some(raw) = cfg.get("neteaseCookie").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let Ok(clean) = crate::lyrics::clean_cookie(raw) else {
+        // 洗不出来的脏值**不清空**：那可能是用户手写的、我们看不懂的东西，
+        // 静默丢掉比留着更糟（`set_config` 会在用户下次保存时明确报错）
+        return false;
+    };
+    if clean == raw {
+        return false;
+    }
+    if let Some(map) = cfg.as_object_mut() {
+        map.insert("neteaseCookie".into(), serde_json::json!(clean));
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 老版本会把用户粘贴的原文（可能每个字符一行）原样写进 `config.json`，
+    /// 那时它当 `Cookie` 头发不出去，而界面上只显示「已设置」。启动时那次读盘要把它
+    /// 就地洗干净，且**只有真的脏了才写盘** —— 否则每次启动都多一次无谓的磁盘写。
+    #[test]
+    fn a_dirty_stored_cookie_is_folded_once_at_load() {
+        // 开发者工具里「每行一对键值」的粘贴：行尾带分号，换行要折成空格
+        let mut cfg = json!({ "neteaseCookie": "MUSIC_U=abc;\n__csrf=def;\n", "theme": "dark" });
+        assert!(normalize_netease_cookie(&mut cfg), "脏值该被洗掉");
+        assert_eq!(cfg["neteaseCookie"], json!("MUSIC_U=abc; __csrf=def"));
+        assert!(!normalize_netease_cookie(&mut cfg), "洗过之后再读一次不该再改");
+
+        /* 没有分号、只有换行的那份**只能折成空格**：`MUSIC_U=abc\n__csrf=def` 无从判断
+           是「两对键值」还是「一个值里带空白」，猜错会把真值切坏。这条断言是给以后
+           想「顺手按换行再拆一次」的人看的：不许拆。 */
+        let mut no_semicolon = json!({ "neteaseCookie": "MUSIC_U=abc\n__csrf=def" });
+        assert!(normalize_netease_cookie(&mut no_semicolon));
+        assert_eq!(no_semicolon["neteaseCookie"], json!("MUSIC_U=abc __csrf=def"));
+
+        // 干净的值（含空串）与「没有这个键」都不动
+        let mut clean = json!({ "neteaseCookie": "MUSIC_U=abc" });
+        assert!(!normalize_netease_cookie(&mut clean));
+        let mut empty = json!({ "neteaseCookie": "" });
+        assert!(!normalize_netease_cookie(&mut empty));
+        let mut missing = json!({ "theme": "dark" });
+        assert!(!normalize_netease_cookie(&mut missing));
+        // 认不出形状的脏值原样留着：宁可让它继续脏，也不要静默清掉用户的凭据
+        let mut garbage = json!({ "neteaseCookie": "=没有键名" });
+        assert!(!normalize_netease_cookie(&mut garbage));
+        assert_eq!(garbage["neteaseCookie"], json!("=没有键名"));
+    }
 }
 
 /// 局部更新配置（只传要改的键）。
@@ -124,6 +182,14 @@ fn set_config_inner(st: &super::AppState, patch: Value) -> Result<Value, String>
     if let (Some(dst), Some(src)) = (cfg.as_object_mut(), patch.as_object()) {
         for (k, v) in src {
             if k.ends_with("Cookie") && v.as_str() == Some(super::config_file::MASKED) {
+                continue;
+            }
+            /* 网易云的 Cookie 一律先清洗再落盘：粘贴带进来的换行 / 制表符会让 `Cookie`
+               请求头发不出去，而界面上只显示「已设置」——脏值存进去就再也看不出问题。
+               清洗不出来（不是键值对）时**报错而不是存**，见 `lyrics::clean_cookie`。 */
+            if k == "neteaseCookie" {
+                let raw = v.as_str().unwrap_or("");
+                dst.insert(k.clone(), json!(crate::lyrics::clean_cookie(raw)?));
                 continue;
             }
             dst.insert(k.clone(), v.clone());

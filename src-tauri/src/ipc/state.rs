@@ -110,6 +110,14 @@ impl AppState {
         // 可写目录可能还不存在（首次运行安装版），先建出来
         let _ = std::fs::create_dir_all(&paths.writable);
         let mut config = super::config_file::load_config(&paths.writable);
+        /* 盘上那份网易云 Cookie 若是脏的（粘贴带进来的换行 / 制表符），就地洗干净 ——
+        脏值当请求头发不出去，而界面上只显示「已设置」，用户查不到原因（见
+        `config::normalize_netease_cookie`）。清洁的值不动盘。 */
+        if super::config::normalize_netease_cookie(&mut config)
+            && super::config_file::save_config(&paths.writable, &config).is_err()
+        {
+            crate::log_line("网易云 Cookie 清洗后落盘失败，本次仍按清洗后的值使用");
+        }
         /* 老版本的单开键（`svsepRuntimeDir`）收敛到 `extDir` 上，之后只认后者 ——
         两个键同时活着会让「设置页显示 A、实际落 B」这种鬼状态出现。
         ⚠️ 改了就立刻落盘：不落的话下次启动又得按老键再推一遍，而那时用户可能已经在
