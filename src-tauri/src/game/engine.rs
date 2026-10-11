@@ -496,3 +496,234 @@ pub const MODEL_FILES: [&str; 3] = ["encoder.onnx", "segmenter.onnx", "estimator
 **不许改成 `d.is_dir()`**。要改那条语义请去 `artifact::locate` 改，别在这里加壳。
 ⚠️ 「绿色版两层同路径、判层只能比绝对路径」那条也仍然有效，见
 `midi_transcribe::status` 的 `origin` 与 `clear_downloads` 的注。 */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::algo;
+    use std::path::PathBuf;
+
+    /// 一个模型目录：`VSS_MIDI_MODELS` 指到哪儿就用哪儿，否则跳过这条测试。
+    fn models_dir() -> Option<PathBuf> {
+        std::env::var_os("VSS_MIDI_MODELS").map(PathBuf::from)
+    }
+
+    /* ── 只解 `.onnx` 里我们要的那两个字段 ─────────────────────────────
+       ONNX 是 protobuf，而这条测试要的东西只有两样：某个初始化张量的名字与形状。
+       引一个 protobuf 生成器只为这个不值得（`build.rs` 要跟着吃一份 .proto），
+       所以这里按线格式手解 —— 与 `midi_transcribe` 里那条 `mini_onnx_is_a_well_formed_model`
+       同一套写法。 */
+
+    /// 解一个 varint，返回 `(值, 吃掉几个字节)`。
+    fn take_varint(b: &[u8], i: usize) -> Option<(u64, usize)> {
+        let (mut v, mut n) = (0u64, 0usize);
+        loop {
+            let byte = *b.get(i + n)?;
+            v |= ((byte & 0x7f) as u64) << (7 * n);
+            n += 1;
+            if byte & 0x80 == 0 {
+                return Some((v, n));
+            }
+        }
+    }
+
+    /// 把一个 varint 编回线上形状。
+    ///
+    /// ⚠️ **必须编回 varint，不能存 `to_le_bytes()`**：`fields()` 的消费者都是按
+    /// 线格式理解 `value` 的（`tensor_dims` 要把它再解一次，`str_of` 只对 LEN 用）。
+    /// 存成定长小端再当 varint 解，等于把 varint 的字节读反 —— 实测 rope 的 5000
+    /// （`88 13`）会变成 2440（`13 88`），而 2440 帧这个结论看起来又「很像真的」。
+    fn push_varint(out: &mut Vec<u8>, mut v: u64) {
+        loop {
+            let mut byte = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if v == 0 {
+                return;
+            }
+        }
+    }
+
+    /// 把一个 message 拆成 `(字段号, 线格式, 内容)`。
+    ///
+    /// ⚠️ **必须能跳过 1/5 号线格式**（定长 64/32 位）：权重里那些 `raw_data`
+    /// 就是定长块，遇到它们直接判解析失败的话，整张图的初始化张量一个都读不到
+    /// （表现是「图里没有 rope.pe_cos」这种误判）。
+    fn fields(b: &[u8]) -> Option<Vec<(u64, u64, Vec<u8>)>> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            let (tag, n) = take_varint(b, i)?;
+            i += n;
+            let (num, wire) = (tag >> 3, tag & 7);
+            match wire {
+                0 => {
+                    let (v, n) = take_varint(b, i)?;
+                    i += n;
+                    let mut raw = Vec::new();
+                    push_varint(&mut raw, v);
+                    out.push((num, wire, raw));
+                }
+                1 => {
+                    i = i.checked_add(8)?;
+                    if i > b.len() {
+                        return None;
+                    }
+                }
+                2 => {
+                    let (len, n) = take_varint(b, i)?;
+                    i += n;
+                    let end = i.checked_add(len as usize)?;
+                    if end > b.len() {
+                        return None;
+                    }
+                    out.push((num, wire, b[i..end].to_vec()));
+                    i = end;
+                }
+                5 => {
+                    i = i.checked_add(4)?;
+                    if i > b.len() {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        Some(out)
+    }
+
+    fn str_of(f: &[u8]) -> String {
+        String::from_utf8_lossy(f).to_string()
+    }
+
+    /// `TensorProto.dims`（字段 1，repeated varint）。
+    ///
+    /// 实测量到的形状是 `[1, 5000, 32]`：dims 是**初始化张量自己的**字段，
+    /// 不需要再往里找一层 TensorProto。
+    fn tensor_dims(init: &[u8]) -> Vec<u64> {
+        fields(init)
+            .unwrap_or_default()
+            .iter()
+            .filter(|(n, wire, _)| *n == 1 && *wire == 0)
+            .filter_map(|(_, _, v)| take_varint(v, 0).map(|(x, _)| x))
+            .collect()
+    }
+
+    /// 从 `encoder.onnx` 里读出 rope 表的帧数。
+    ///
+    /// ⚠️ **dims 就在初始化张量本身**（`TensorProto` 的字段 1），不需要再往里
+    /// 找一层；`name` 是恰好也是 8 的另一个字段（LEN）。实测量到的形状是
+    /// `pe_cos` = `[1, 5000, 32]`，取第二维 —— 那就是帧数上限。
+    fn rope_frames_from(onnx: &[u8]) -> Option<u64> {
+        let top = fields(onnx)?;
+        let graph = top
+            .iter()
+            .find(|(n, _, _)| *n == 7)
+            .map(|(_, _, v)| v.clone())?;
+        for (num, _, init) in fields(&graph)? {
+            if num != 5 {
+                continue; // GraphProto.initializer
+            }
+            let f = fields(&init)?;
+            let name = f
+                .iter()
+                .find(|(n, _, _)| *n == 8)
+                .map(|(_, _, v)| str_of(v))
+                .unwrap_or_default();
+            if !name.ends_with("rope.pe_cos") {
+                continue;
+            }
+            return tensor_dims(&init).get(1).copied();
+        }
+        None
+    }
+
+    /// `MAX_ENCODER_SAMPLES` 这个常量是**照着导出图量化出来的**，不是随便挑的。
+    ///
+    /// `encoder.onnx` 的 rope 位置编码是导出时冻结的初始化张量 `[1, N, 32]`，超过
+    /// N 帧的输入会死在那条应用它的 Mul 节点上：
+    ///
+    ///   Non-zero status code returned while running Mul node. Name:'node_mul_348'
+    ///   Attempting to broadcast an axis by a dimension other than 1. 5000 by 6000
+    ///
+    /// 所以这条测试直接去**读那张表的真实形状**，断言我们的上限确实在它之下 ——
+    /// 上游换一版导出（把 N 改小）时，这里会红，而不是等到用户扒长音频时才炸。
+    ///
+    ///     $env:VSS_MIDI_MODELS='%APPDATA%\com.qingmu.vocalworkstation\game\models'
+    ///     cargo test --lib rope_limit -- --ignored --nocapture
+    #[test]
+    #[ignore = "要真模型，按需手动跑"]
+    fn rope_limit_matches_max_encoder_samples() {
+        let Some(dir) = models_dir() else {
+            eprintln!("跳过：没有设 VSS_MIDI_MODELS");
+            return;
+        };
+        let bytes = std::fs::read(dir.join("encoder.onnx")).expect("读 encoder.onnx 失败");
+        let frames = rope_frames_from(&bytes).expect("图里没有 rope.pe_cos 初始化张量");
+        let allowed = (algo::MAX_ENCODER_SAMPLES / 441) as u64;
+        println!("rope 表 {frames} 帧；MAX_ENCODER_SAMPLES={} ⇒ {allowed} 帧", algo::MAX_ENCODER_SAMPLES);
+        assert!(
+            allowed <= frames,
+            "上限 {allowed} 帧超过了图里 rope 表的 {frames} 帧：长音频会死在 Mul 节点上"
+        );
+        // 也别退得太保守：留太多余量等于白白多切几刀
+        assert!(
+            allowed * 10 >= frames * 9,
+            "上限 {allowed} 帧离 {frames} 帧太远，白白多切"
+        );
+    }
+
+    /// 真模型上的回归：`encoder.onnx` 的 rope 表是冻结到 **5000 帧**的初始化张量
+    /// （`…layers.N.attn.attn.rope.pe_cos/pe_sin` 形状 `[1, 5000, 32]`），比它长的
+    /// 输入死在那条应用 rope 的 Mul 节点上，ORT 的原话是
+    /// `Attempting to broadcast an axis by a dimension other than 1. 5000 by 6000`。
+    /// 而切片器只在**静音处**切 —— 一段连续 3 分钟的人声（没有静音）原来会把整段
+    /// 喂给 encoder，于是「部分音频扒谱必失败」，报错还看不出跟长度有关。
+    ///
+    /// 判定必须落在**真实推理**上：`algo` 侧那条单测只保证切出来的片不超限，
+    /// 5000 这个数字是图里的常量，两边对不上的话只有跑一遍图才知道。
+    ///
+    ///     $env:VSS_MIDI_MODELS='%APPDATA%\com.qingmu.vocalworkstation\game\models'
+    ///     cargo test --lib slices_run_through_the_real_encoder -- --ignored --nocapture
+    #[test]
+    #[ignore = "要真模型，按需手动跑"]
+    fn slices_run_through_the_real_encoder() {
+        let Some(models) = models_dir() else {
+            eprintln!("跳过：没有设 VSS_MIDI_MODELS（见这个测试的注释）");
+            return;
+        };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let Some(dll) = crate::midi_transcribe::runtime_dll(&root, &root.join("data")) else {
+            eprintln!("跳过：找不到 onnxruntime（tools/onnxruntime/）");
+            return;
+        };
+
+        // 3 分钟、每帧都高于 -40 dB 的正弦：切片器判定「整段没有静音」，会原样交给 encoder
+        let sr = algo::SAMPLE_RATE as usize;
+        let wave: Vec<f32> = (0..sr * 180).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+        let opts = Options {
+            // 1 步就够：这里验的是 encoder 的形状，不是 D3PM 的采样质量
+            steps: 1,
+            threads: 4,
+            device: Device::Cpu,
+            ..Options::default()
+        };
+        let report = transcribe(&models, &dll, &wave, &opts, &|_, _| {})
+            .expect("3 分钟连续音频该能扒完（切片器必须把它切到 encoder 的 rope 上限之下）");
+        assert!(
+            report.slices.len() > 1,
+            "3 分钟必须有多次切片，实际 {}",
+            report.slices.len()
+        );
+        for (offset, n) in &report.slices {
+            assert!(
+                *n <= algo::MAX_ENCODER_SAMPLES,
+                "offset={offset} 的切片有 {n} 个采样点，超过 encoder 的 {}",
+                algo::MAX_ENCODER_SAMPLES
+            );
+        }
+    }
+}

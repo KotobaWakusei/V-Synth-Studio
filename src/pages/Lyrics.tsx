@@ -1,7 +1,7 @@
-import {useEffect, useMemo, useRef, useState} from 'react'
+import {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react'
 import {GlassSegmentedControl, GlassSwitch} from '@ttqtt/liquid-glass-react'
 import {api} from '@/lib/api'
-import {saveConfig} from '@/lib/config'
+import {getConfig, onConfigChange, saveConfig, syncConfig} from '@/lib/config'
 import {baseName, errText} from '@/lib/format'
 import {Button} from '@/components/Button'
 import {Credit, Upstream} from '@/components/Credit'
@@ -169,6 +169,19 @@ function alignTrans(text: string | null | undefined): (ms: number) => string {
 const fmtDuration = (sec?: number): string =>
     sec ? `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}` : ''
 
+/**
+ * 配置里跟登录态有关的那几项。
+ *
+ * ⚠️ **必须订阅配置存储，不能只读 `state.config`**：手机号登录 / 退出登录 / 续期这三条
+ * 命令是**后端**自己写 `config.json` 的，前端内存那份要等下一次 `get_state` 才对得上，
+ * 而歌词页的登录徽章与「退出登录」按钮都按它显示 —— 不订阅就会出现「刚登录成功，
+ * 界面还写着未登录」。`state` 那份仍是启动时的快照，只当兜底。
+ */
+function useNeteaseAuth() {
+    const cfg = useSyncExternalStore(onConfigChange, getConfig, getConfig)
+    return {cookie: String(cfg.neteaseCookie ?? ''), expireAt: Number(cfg.neteaseCookieExpire ?? 0)}
+}
+
 /* ══════════════════════════════════════════════════════════════════ 视图 ══ */
 
 export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) {
@@ -213,9 +226,8 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     const [loginTone, setLoginTone] = useState<ToastTone>('warn')
     const [busy, setBusy] = useState(false)
     const [nickname, setNickname] = useState('')
-    /** 会员标签（「黑胶SVIP·肆」）与 MUSIC_U 的过期时间，跟着 `lyricsAccount` 走 */
+    /** 会员标签（「黑胶SVIP·肆」）跟着 `lyricsAccount` 走；有效期读配置存储 */
     const [vip, setVip] = useState('')
-    const [expireAt, setExpireAt] = useState(0)
     /**
      * 服务端明确说凭据失效了（`lyricsAccount` 的 `expired`）—— 界面据此置为未登录。
      *
@@ -225,6 +237,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     const [authExpired, setAuthExpired] = useState(false)
     const [renewing, setRenewing] = useState(false)
     const [neteaseCookie, setNeteaseCookie] = useState('')
+    const {cookie: storedCookie, expireAt} = useNeteaseAuth()
 
     /**
      * `edited` —— 用户手动改过输出目录之后，设置页里的默认值不再盖掉它。
@@ -232,6 +245,10 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
      */
     const flags = useRef({edited: false, init: false})
     const timer = useRef<number | null>(null)
+    /** 取词请求的序列号：只有最新一次的结果能落地（见 `loadLyric`） */
+    const loadSeq = useRef(0)
+    /** 上一次自动填进「文件名」的那个名字，用来区分「用户改过」与「我们填的」 */
+    const autoName = useRef('')
 
     useEffect(() => {
         if (flags.current.init || !state) return
@@ -254,10 +271,10 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
         }
     }, [])
 
-    /* 登录态校验 + 临近过期自动续期。挂在挂载时跑一次就够 —— 跟着 `state` 刷新反复打接口
-       没有意义，而「登录态有没有过期」这件事一天变一次。config 只在首帧读，故意不进依赖。 */
+    /* 登录态校验 + 临近过期自动续期。挂在挂载时跑一次就够 —— 之后每次登录 / 保存 Cookie /
+       续期都由那几条命令自己刷，反复打接口没有意义，而「登录态有没有过期」一天变一次。 */
     useEffect(() => {
-        if (!config.neteaseCookie) return
+        if (!storedCookie) return
         void refreshAccount({renew: true})
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
@@ -298,17 +315,27 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     /**
      * 取词。`playable` 是搜索结果那条上的「能不能下」标记，**原样带进 `current`** ——
      * 后端取词接口不探测可下载性，只有搜索结果探测过（见 `downloadSong` 的重试用它挑版本）。
+     *
+     * ⚠️ **只认最后一次请求**（`loadSeq`）：搜索结果是一条条点的，点快了就有两次请求同时在
+     * 飞，而它们回来的顺序不保证与点单顺序一致 —— 不设防的话「选中的是 B，预览里是 A」。
+     * 三条取词路（搜索 / 链接 / 本地文件）都从这里过一遍同一个序列号，所以互相也抢不了。
      */
     const loadLyric = async (id: string | number, playable?: boolean) => {
+        const seq = ++loadSeq.current
         setPreviewErr(null)
         try {
             const res = await api.lyricsGet({source: 'netease', id})
+            if (seq !== loadSeq.current) return
             setDoc(res)
             setCurrent({...res, id, source: 'netease', playable})
-            // 文件名跟着歌名走，但**别踩掉用户已经填过的名字**
-            setName((prev) => prev.trim() || [res.song?.name, res.song?.artists].filter(Boolean).join(' - '))
+            /* 文件名跟着歌名走，但**用户自己改过就别动**（按「上一次自动填的那个」判，
+               而不是「非空就不动」—— 后者会让第二首歌的下载文件名还是第一首的） */
+            const suggested = [res.song?.name, res.song?.artists].filter(Boolean).join(' - ')
+            setName((prev) => (prev.trim() && prev !== autoName.current ? prev : suggested))
+            autoName.current = suggested
             if (!String(res.trans ?? '').trim()) onToast('这首歌没有翻译歌词，只能导出原文', 'info')
         } catch (e) {
+            if (seq !== loadSeq.current) return
             setPreviewErr(errText(e))
             onToast(errText(e), 'err')
         }
@@ -341,12 +368,16 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     const importPath = async (path: string) => {
         setImporting(true)
         setPreviewErr(null)
+        // 本地导入也算一次新的取词：把还在飞的搜索取词作废（见 `loadLyric`）
+        loadSeq.current += 1
         try {
             const res = await api.lyricsImport({path})
             const id = res.id ?? path
             setDoc(res)
             setCurrent({...res, id, source: res.source ?? 'file'})
-            setName((prev) => prev.trim() || [res.song?.name, res.song?.artists].filter(Boolean).join(' - '))
+            const suggested = [res.song?.name, res.song?.artists].filter(Boolean).join(' - ')
+            setName((prev) => (prev.trim() && prev !== autoName.current ? prev : suggested))
+            autoName.current = suggested
             if (res.encoding === 'unknown') {
                 onToast('这个文件既不是 UTF-8 也不是 GBK，显示出来可能是乱码', 'warn')
             } else {
@@ -537,7 +568,6 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                 setAuthExpired(false)
                 setNickname(a.nickname ?? '')
                 setVip(a.vip ?? '')
-                setExpireAt(a.expiresAt ?? 0)
                 // 临近过期就顺手续一次（该不该续由后端算好）。续期失败只是「这次没续上」，不影响登录态
                 if (opts?.renew && a.shouldRenew) void renewLogin()
             } else if (a.state === 'expired') {
@@ -545,7 +575,6 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                 setAuthExpired(true)
                 setNickname('')
                 setVip('')
-                setExpireAt(0)
                 setMsg('网易云的登录态已经失效，请重新登录（扫码不可用，用短信验证码或换一条 Cookie）。', 'warn')
             }
             // offline / anonymous 什么都不做：前者是网络问题，后者本来就该是空
@@ -561,8 +590,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             const r = await api.lyricsRenew()
             // 续期成功说明服务端又认这个账号了，把「已失效」摘掉
             setAuthExpired(false)
-            setExpireAt(r.expiresAt ?? 0)
             if (r.vip) setVip(r.vip)
+            // 新有效期与换发后的凭据都在后端盘上：同步进前端那份，界面才显示得对
+            await onRefreshState()
             onToast('网易云登录已续期', 'ok')
         } catch (e) {
             onToast(`续期没成功：${errText(e)}（不影响当前登录）`, 'warn')
@@ -572,7 +602,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     }
 
     /** 本地还存着凭据（哪怕服务端已经说它失效）—— 「续期 / 退出登录」按它显示 */
-    const hasCookie = !!config.neteaseCookie
+    const hasCookie = !!storedCookie
     /** 状态徽章按它显示：凭据在**且**服务端没说它失效 */
     const loggedIn = hasCookie && !authExpired
 
@@ -621,7 +651,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             setAuthExpired(false)
             setNickname(res.nickname ?? '')
             setVip(res.vip ?? '')
-            setExpireAt(res.expiresAt ?? 0)
+            // 凭据与有效期是**后端**写进 config.json 的：把后端那份同步进内存，
+            // 徽章才会从「未登录」变成「已登录为 …」（见 `useNeteaseAuth` 的说明）
+            await onRefreshState()
             // 会员标签跟昵称一起报出来（「已登录为 xxx（黑胶SVIP·肆）」）——
             // 它直接影响能拿到哪一档音质，用户看一眼就知道无损为什么拿不到
             const who = [res.nickname, res.vip].filter(Boolean).join('（')
@@ -649,10 +681,10 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             await api.lyricsLogout('netease')
             setNickname('')
             setVip('')
-            setExpireAt(0)
             setAuthExpired(false)
-            await onRefreshState()
             setNeteaseCookie('')
+            // 后端已经落盘了：把这一份同步进内存，徽章立刻变回「未登录」
+            await onRefreshState()
             setMsg('已退出登录。', 'ok')
             onToast('已退出登录', 'ok')
         } catch (e) {
@@ -664,27 +696,36 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
     /**
      * 保存 Cookie。
-     * 从开发者工具整行复制出来的 Cookie 常带换行，而 Cookie 头里不能有换行 —— 折成一行再存。
+     *
+     * ⚠️ **不给这里做任何字符串处理**：清洗（压掉换行 / 制表符、补 `MUSIC_U=` 前缀）在
+     * 后端的 `lyrics::clean_cookie` 一份就够，而且它是**唯一会在用户粘错时报错**的地方。
+     * 前端再折一次行，只会掩盖后端看得见的脏数据（两处规则不一致时更难查）。
+     *
+     * 顺序上先落盘再问账号：`lyricsAccount` 读的是后端那份配置，落盘之前它看不到新值。
      * 留空保存 = 清除（后端语义）。
      */
     const saveCookie = async (raw: string) => {
-        const value = raw.replace(/\s*\r?\n\s*/g, ' ').trim()
-        if (value === MASK) {
+        if (raw.trim() === MASK) {
             onToast('输入框里显示的是占位「已设置」，不是新的 Cookie', 'warn')
             return
         }
         setBusy(true)
         try {
-            await api.saveConfig({neteaseCookie: value})
-            await onRefreshState()
+            const r = await api.saveConfig({neteaseCookie: raw.trim()})
+            // 后端回的是清洗过的值（且已打码）：同步进内存，界面与那份配置对齐
+            syncConfig(r?.config)
             setNeteaseCookie('')
             // 换了凭据就重新判：存了新的当然要摘掉「已失效」，清空了本来也不该留着
             setAuthExpired(false)
-            if (!value) {
+            if (raw.trim()) {
+                await refreshAccount()
+                onToast('Cookie 已保存', 'ok')
+            } else {
                 setNickname('')
+                setVip('')
                 setMsg('已清除网易云的登录态 Cookie，取歌词会退回未登录。', 'warn')
+                onToast('Cookie 已清除', 'ok')
             }
-            onToast(value ? 'Cookie 已保存' : 'Cookie 已清除', 'ok')
         } catch (e) {
             onToast(errText(e), 'err')
         } finally {
@@ -749,6 +790,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                         key={`${asId(s.id) || i}`}
                                         type="button"
                                         className="lyrics-result"
+                                        /* 选中的那条留个记号：同名歌在结果里往往有十几个版本，
+                                           不回显「现在预览的是哪一条」时，点错一个也看不出来 */
+                                        data-current={current?.source !== 'file' && asId(current?.id) === asId(s.id)}
                                         onClick={() => void loadLyric(s.id!, s.playable)}
                                     >
                                         <Icon name="music" size={15}/>
@@ -896,7 +940,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
                         <Field
                             label="网易云 Cookie"
-                            hint="保存后不会回显真实值，只会显示「已设置」（输入框保持空白）。留空保存 = 清除。"
+                            hint="粘贴进来带换行 / 制表符也没事：保存时会把空白压成一行再存（粘错形状会明确报错）。只粘 MUSIC_U 一格的值也行，程序会自己补上键名。保存后不会回显真实值，只会显示「已设置」。留空保存 = 清除。"
                         >
                             <TextArea
                                 rows={3}
@@ -1076,7 +1120,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
 
                         <Field
                             label="下载音质"
-                            hint="档位是「上限」而不是承诺：服务端给不到就按它能拿到的最高档下，并如实写明实际存下来的是哪一档（求无损只给 320K 时不会假装成功）。无损 / Hi-Res 需要对应会员，未登录最高 128K。"
+                            hint="档位是「上限」而不是承诺：服务端给不到就按它能拿到的最高档下，并如实写明实际存下来的是哪一档（求无损只给 320K 时不会假装成功）。无损 / Hi-Res 需要对应会员，未登录最高 128K。会员曲 `VIP` / `付费专辑` 只给试听片段，后端会拦下来。"
                         >
                             <GlassSegmentedControl
                                 aria-label={t("下载音质")}
@@ -1084,6 +1128,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                                     {value: 'auto', label: '自动'},
                                     {value: 'lossless', label: '无损'},
                                     {value: 'exhigh', label: '320K'},
+                                    {value: 'higher', label: '192K'},
                                     {value: 'standard', label: '128K'},
                                 ]}
                                 value={quality}

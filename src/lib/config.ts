@@ -208,6 +208,23 @@ async function flush() {
 }
 
 /**
+ * 把**后端刚回的**配置合并进内存那份，不落盘。
+ *
+ * 用途是「后端自己改了配置」的那几条命令：手机号登录 / 退出登录 / 续期都把凭据写进
+ * `config.json`，但它们**不经过 `saveConfig`** —— 内存那份还停在旧值，界面就会一直
+ * 显示未登录、连「退出登录」都不给。拿到 `get_state` / `get_config` 的回包时顺手
+ * 灌回来，后端才是唯一真相。
+ *
+ * ⚠️ 与 `saveConfig` 的区别：这里**不写文件、也不排队**。写操作一律走 `saveConfig`
+ * （它有自己的乐观更新与防抖），拿它当「同步」用会把后端的值再发回去一遍。
+ */
+export function syncConfig(cfg: AppConfig | undefined): void {
+    if (!cfg || typeof cfg !== 'object') return
+    snapshot = {...snapshot, ...cfg}
+    emit()
+}
+
+/**
  * 存几项设置。**立刻**在内存里生效（订阅者下一帧就重渲染），落盘防抖 250ms。
  */
 export function saveConfig(patch: Record<string, unknown>): void {

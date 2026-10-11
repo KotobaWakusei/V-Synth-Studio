@@ -61,6 +61,71 @@
 .lic-upstream.upstream {
     margin: 0;
 }
+/* ── 赞助（pages/Settings.tsx）────────────────────────────────────────
+   一段话 + 两张收款码（微信 / 支付宝）。**整块靠左**：它是面板里的一段内容，
+   居中会让文字和码都不好读（作者的原话也是靠左）。 */
+.sponsor {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--lg-space-3);
+}
+
+.sponsor-words {
+    /* 一行行长一点更好读：正文宽度限制交给 `max-width`，而不是让它在整块面板里拉满 */
+    max-width: 46ch;
+    margin: 0;
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: var(--lg-label-secondary);
+}
+
+/* 两张码并排；窄了自动换行（面板本身在窄屏就是单栏） */
+.sponsor-codes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--lg-space-4);
+}
+
+.sponsor-card {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--lg-space-2);
+}
+
+/* ⚠️ **白底**：码是给手机摄像头扫的，跟着暗色主题走会扫不出来
+   （和 B 站扫码登录那块 `.qr-box` 同一条规矩）。
+   只约束宽度：两张图的宽高比差很多（正方形 vs 竖长条），高度让各自走。 */
+.sponsor-code {
+    width: 212px;
+    padding: var(--lg-space-3);
+    border-radius: var(--lg-radius-m);
+    background: #fff;
+    border: 1px solid var(--lg-separator);
+}
+
+/* 支付宝那张是竖的（1260×1890），同宽会高出一大截 —— 按高度反过来约束它，
+   两张的**视觉高度**才接近，并排看着不歪。 */
+.sponsor-code-alipay {
+    width: auto;
+    height: 212px;
+}
+
+.sponsor-caption {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--lg-label-secondary);
+}
+
+.sponsor-hint {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--lg-label-tertiary);
+}
+
 /* ── 设置页：左分节 + 右内容 ─────────────────────────────────── */
 .settings {
     display: flex;

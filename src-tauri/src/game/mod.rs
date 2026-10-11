@@ -12,6 +12,10 @@
 //! 算法与上游 PyTorch 参考实现逐位一致（golden 向量 21 项全等；真实人声 41 个
 //! 音符逐个相同），**每个函数一个字都不许改** —— 那正是它被验证过的样子。
 //!
+//! 唯一的例外是「喂给图之前按图的能力切一刀」：`algo::MAX_ENCODER_SAMPLES` /
+//! `split_oversized`（导出图的 rope 表是冻结到 5000 帧的初始化张量，比它长的输入
+//! 会死在图里的 Mul 节点上）。它加在**上游的静音切分之上**，不改任何一条算法规矩。
+//!
 //! `fixture` 里那个 `read_wav_mono_f32` 是例外：它不只是给验证用的，
 //! 推理路径上「ffmpeg 转出来的 44.1 kHz 单声道 f32 WAV」正好也由它读
 //! （见 `midi_transcribe::transcribe_blocking`）。

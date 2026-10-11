@@ -1,7 +1,7 @@
 import {type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState} from 'react'
 import {api, type UpdateCheck} from '@/lib/api'
-import {getConfig, onConfigError, saveConfig} from '@/lib/config'
-import {useI18n} from '@/lib/i18n'
+import {type AppConfig, getConfig, onConfigError, saveConfig, syncConfig} from '@/lib/config'
+import {useI18n, type UiLanguage, setUiLanguage} from '@/lib/i18n'
 import type {AppState} from '@/lib/types'
 import {Icon, type IconName} from '@/components/Icon'
 import {GlassPanel, Panel} from '@/components/Panel'
@@ -114,7 +114,20 @@ export default function App() {
     const refreshState = useCallback(async () => {
         setRefreshing(true)
         try {
-            setState(await api.state())
+            const next = await api.state()
+            setState(next)
+            /* 后端可能自己改过配置：手机号登录、退出登录、续期都把凭据写进 config.json，
+               而它们不走 `saveConfig`。不灌回内存那份，歌词页的登录徽章就一直是旧的
+               （见 `lib/config.ts::syncConfig`）。 */
+            syncConfig(next.config as AppConfig | undefined)
+            /* 安装时选的语言：**只在第一次拿到状态时应用一次**。
+               之后用户在「设置」里改过的以配置为准 —— 否则每次刷新状态都会把他改的
+               语言按回安装时那个。装完之后这个字段不再有值也没关系（后端只读一次
+               注册表，但前端这边只认第一次，逻辑上更稳）。 */
+            if (!langApplied.current && next.installerLanguage) {
+                langApplied.current = true
+                setUiLanguage(next.installerLanguage as UiLanguage)
+            }
             setDead(null)
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
@@ -139,6 +152,8 @@ export default function App() {
      */
     const [update, setUpdate] = useState<UpdateCheck | null>(null)
     const [updateOpen, setUpdateOpen] = useState(false)
+    /** 安装时选的语言只应用一次（见 `refreshState`） */
+    const langApplied = useRef(false)
     useEffect(() => {
         let alive = true
         void api

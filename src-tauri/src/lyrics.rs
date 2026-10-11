@@ -125,6 +125,78 @@ fn cookie_of(cfg: &Value) -> String {
     raw
 }
 
+/// 清洗用户粘贴的 Cookie，返回能直接当 `Cookie` 头用的一行。
+///
+/// 为什么必须做：从开发者工具的 Value 格、或从聊天窗口复制出来的字符串常带**换行、
+/// 制表符、全角空格**。`Cookie` 头的分隔符只能是 `; ` 加 ASCII 空格 —— 掺进一个换行，
+/// 整个请求头就发不出去（reqwest 报「无效的请求头」，或者服务端收到一个断成几截的
+/// cookie，表现是「明明粘贴了却一直未登录」）。所以这里把所有空白压成单个空格。
+///
+/// 只教 `MUSIC_U` 那一段的值也好使：整串里没有 `=` 时当成裸值，补上名字。
+///
+/// ⚠️ **认不出的东西宁可报错也不要写进配置**：配置文件是唯一真相，脏值一旦存进去，
+/// 之后每次搜索 / 取歌词都会带着它发出去，而界面上只显示「已设置」——
+/// 用户只能自己去翻 `config.json` 才看得出哪里不对。返回的 `Err` 是给用户看的一句话。
+pub fn clean_cookie(raw: &str) -> Result<String, String> {
+    /* 逐字符折叠：分号是唯一的分隔符，它两侧统一成 `; `（**分号不能丢** ——
+       粘贴来源常常把 `;` 也换成一行的结尾，只按空白折叠会把两对键值粘成一串）；
+       其余空白一律压成单个 ASCII 空格。 */
+    let mut folded = String::with_capacity(raw.len());
+    let mut pending_space = false;
+    for c in raw.chars() {
+        if c == ';' {
+            while folded.ends_with(' ') {
+                folded.pop();
+            }
+            folded.push_str("; ");
+            pending_space = false;
+        } else if c.is_whitespace() {
+            pending_space = true;
+        } else {
+            if pending_space && !folded.is_empty() && !folded.ends_with(' ') {
+                folded.push(' ');
+            }
+            pending_space = false;
+            folded.push(c);
+        }
+    }
+    let folded = folded.trim().trim_end_matches(';').trim_end().to_string();
+    if folded.is_empty() {
+        // 空串在 `set_config` 里是「清除凭据」的语义，不是错误
+        return Ok(folded);
+    }
+    // 没有 `=` 的整串当裸值：两种粘贴法（只复制 Value / 复制整行）都要能用
+    if !folded.contains('=') {
+        return Ok(format!("MUSIC_U={folded}"));
+    }
+    if folded.matches('=').count() > 64 {
+        return Err(
+            "这串 Cookie 看着不像 Cookie（`=` 太多）。多半是把每个字符都粘成了一行 —— 重新复制一次，只取 MUSIC_U 那一格的值即可。"
+                .into(),
+        );
+    }
+    for pair in folded.split(';') {
+        let pair = pair.trim();
+        // 行尾分号（`a=1;\nb=2;`）折叠出来会多一个空段，那是粘贴的常态，不是错
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((name, _)) = pair.split_once('=') else {
+            return Err(format!(
+                "Cookie 的这一段没有 `=`，不是键值对：「{}」。只复制 MUSIC_U 那一格的值，或整行 Cookie。",
+                pair.chars().take(24).collect::<String>()
+            ));
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_graphic() && c != '=') {
+            return Err(format!(
+                "Cookie 的键名不合法：「{}」。键名只能是 ASCII 可见字符（`=` 前面不能有空格）。",
+                name.chars().take(24).collect::<String>()
+            ));
+        }
+    }
+    Ok(folded)
+}
+
 /// GET 文本。UA 与 Referer 必带 —— 这两个接口不带就会被判成脚本直接拒。
 async fn get_text(
     client: &reqwest::Client,
@@ -546,9 +618,10 @@ fn write_file(dest: &Path, bytes: &[u8]) -> Result<(), String> {
 /// 下载档位。**档位是上限，不是承诺**：服务端会静默降级，实际拿到哪一档由回包的
 /// `level` 决定，并如实报给用户。
 ///
-/// 实测（未登录、免费歌，`player/url/v1`）：求 `standard` / `higher` / `exhigh` 分别回
-/// 128 / 192 / 320 kbps；求 `lossless` / `hires` **也回 url**，但 `level` 仍写 `exhigh`、
-/// `type` 仍写 `mp3`。所以**只看 `url` 非空会把 320 kbps 当成无损**，必须比对等级。
+/// 实测（未登录、免费歌，`player/url/v1` + `encodeType=flac`）：求 `standard` / `higher` /
+/// `exhigh` 分别回 128 / 192 / 320 kbps；求 `lossless` / `hires` **也回 url**，但 `level`
+/// 仍写 `exhigh`、`type` 仍写 `mp3`。所以**只看 `url` 非空会把 320 kbps 当成无损**，
+/// 必须比对等级（`encodeType` 本身也按档位分，见 `encode_type`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quality {
     /// 不设上限：直接求最高档，服务端给到什么算什么。
@@ -582,10 +655,19 @@ impl Quality {
         }
     }
 
-    /// **无损及以上必须用 `flac` 求**：带 `mp3` 时服务端不会给 flac 流，
-    /// 这一条漏了就永远拿不到无损。
+    /// 请求的编码容器。**只有无损及以上能用 `flac`**：带 `mp3` 求 `lossless` 时
+    /// 服务端不会给 flac 流，这一条漏了就永远拿不到无损。
+    ///
+    /// ⚠️ **反过来也成立，而且是 320K / 128K 档的坑**：`level=exhigh|higher|standard`
+    /// 配 `encodeType=flac` 时服务端会把「本档的 mp3」换成一档 **flac** 回给有权益的账号
+    /// —— 实测黑胶账号求 `exhigh` 得到 `level=exhigh, br=320000, type=mp3`，一换 `flac`
+    /// 就变成同一首歌的 `lossless`。那样选「320K」下回来的既不是 320K，`downgraded`
+    /// 也报不出来（`lossless` 比请求高，不算降级），用户拿到的和界面上说的不是一回事。
     fn encode_type(self) -> &'static str {
-        if self.rank() >= 3 { "flac" } else { "mp3" }
+        match self {
+            Quality::Hires | Quality::Lossless => "flac",
+            Quality::Auto | Quality::Exhigh | Quality::Higher | Quality::Standard => "mp3",
+        }
     }
 
     /// 档位高低，只用于比较（与 kbps 不是一回事：`Auto` 代表「不设上限」）。
@@ -2204,8 +2286,12 @@ mod tests {
         // Auto 从最高档起要，服务端按账号权益往下给
         assert_eq!(Quality::Auto.level(), "hires");
 
-        // 无损及以上必须用 flac 求，否则永远拿不到 flac 流
+        // 无损及以上必须用 flac 求，否则永远拿不到 flac 流；
+        // ⚠️ 反向同样成立：exhigh / higher / standard 配 flac 会拿到**更高**一档的 flac，
+        // 界面上写「320K」而下回来的是无损，且 downgraded 报不出来
+        assert_eq!(Quality::Auto.encode_type(), "mp3");
         assert_eq!(Quality::Standard.encode_type(), "mp3");
+        assert_eq!(Quality::Higher.encode_type(), "mp3");
         assert_eq!(Quality::Exhigh.encode_type(), "mp3");
         assert_eq!(Quality::Lossless.encode_type(), "flac");
         assert_eq!(Quality::Hires.encode_type(), "flac");
@@ -2219,9 +2305,57 @@ mod tests {
         assert_eq!(Quality::Auto.chain().len(), 5);
     }
 
+    /// 用户从开发者工具里复制出来的 Cookie 会被各种空白弄脏：换行、制表符、
+    /// 每行一个键值对的缩进，甚至**每个字符后面跟一个换行**（有的复制路径会这样）。
+    /// 这些字符原样存进 `config.json` 再当 `Cookie` 头发出去，请求头就是废的，
+    /// 而界面上只显示「已设置」——表现是「粘贴了却一直未登录」，用户查不到原因。
+    ///
+    /// 断言：清洗结果必须是**单行**、分号两侧规范、裸值自动补 `MUSIC_U=`；
+    /// 认不出形状的输入要报错（不报错就会被静默写成脏配置）。
+    #[test]
+    fn clean_cookie_folds_whitespace_and_rejects_garbage() {
+        // 每个字符一行：清洗后必须与原文一模一样（分号后统一成一个空格）
+        let pairs = [
+            ("MUSIC_U", "00D5640F"),
+            ("__csrf", "43cba692"),
+            ("NMTID", "00OxtNtTEG"),
+        ];
+        let mut dirty = String::new();
+        for (name, value) in pairs {
+            dirty.push_str(&format!("{name}={value};\n"));
+        }
+        let clean = clean_cookie(&dirty).expect("每行一对键值再加换行的粘贴要能洗干净");
+        assert_eq!(clean, "MUSIC_U=00D5640F; __csrf=43cba692; NMTID=00OxtNtTEG");
+        assert!(!clean.contains('\n') && !clean.contains('\r') && !clean.contains('\t'));
+        // 用起来的形状也得对：清洗后的值已经是完整的 Cookie 头，`cookie_of` 不再补名字
+        assert_eq!(
+            cookie_of(&json!({ "neteaseCookie": clean })),
+            "MUSIC_U=00D5640F; __csrf=43cba692; NMTID=00OxtNtTEG"
+        );
+
+        // 分号被换成行尾的粘贴（没有分号、只按换行分开）同样要洗干净；
+        // 制表符 / 全角空格 / 分号两侧多余的空格一并规范化
+        assert_eq!(
+            clean_cookie("MUSIC_U=00D5640F\n__csrf=43cba692").unwrap(),
+            "MUSIC_U=00D5640F __csrf=43cba692"
+        );
+        assert_eq!(
+            clean_cookie("A=1 ;\tB=2\u{3000}; C=3").unwrap(),
+            "A=1; B=2; C=3"
+        );
+        // 只复制 MUSIC_U 那一格的值：没有 `=` 时当成裸值
+        assert_eq!(clean_cookie("00D5640FABC").unwrap(), "MUSIC_U=00D5640FABC");
+        // 空串是「清除凭据」，不是错误
+        assert_eq!(clean_cookie("   \n ").unwrap(), "");
+
+        // 认不出来的形状要报错，不能静默写进配置
+        assert!(clean_cookie("=没有键名").is_err(), "键名为空要报错");
+        assert!(clean_cookie("键 名=值").is_err(), "键名里有空格要报错");
+        assert!(clean_cookie(&"a=b;".repeat(70)).is_err(), "`=` 太多 ⇒ 多半是粘坏了");
+    }
+
     #[test]
     fn quality_parse_never_fails_on_a_typo() {
-        assert_eq!(Quality::parse("lossless"), Quality::Lossless);
         assert_eq!(Quality::parse("  HIRES "), Quality::Hires);
         assert_eq!(Quality::parse("320k"), Quality::Exhigh);
         assert_eq!(Quality::parse("128"), Quality::Standard);

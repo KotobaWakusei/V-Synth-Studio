@@ -352,22 +352,97 @@ fn argmin_range(x: &[f32], lo: usize, hi: usize) -> Option<usize> {
     Some(best)
 }
 
+/// Maximum number of samples one slice may hand to `encoder.onnx`.
+///
+/// The exported graph's rotary embedding tables are frozen initializers of
+/// `[1, 5000, 32]` (`…layers.N.attn.attn.rope.pe_cos/pe_sin`), so any input
+/// longer than 5000 frames fails inside the Mul node that applies them:
+/// `Attempting to broadcast an axis by a dimension other than 1. 5000 by N`.
+/// 5000 frames is 50 s at 44.1 kHz / hop 441; 49 s leaves room for the frame
+/// count not landing exactly on `len / 441` (the cut searches 100 ms back, so
+/// the piece lands at 4900 frames at most).
+pub const MAX_ENCODER_SAMPLES: usize = 49 * 44_100;
+
+/// 20 ms of samples at 44.1 kHz — the hop of both the slicer's RMS grid and of
+/// the `quiet_cut` search window.
+const HOP_SAMPLES: usize = 882;
+
+/// `max_sil_kept = 100 ms` in 20 ms frames: the longest silence the upstream
+/// slicer cuts through. Also the width of the window [`quiet_cut`] scans.
+const SIL_WINDOW_FRAMES: usize = 5;
+
+/// Where to cut a piece that would otherwise exceed [`MAX_ENCODER_SAMPLES`]:
+/// the quietest 20 ms frame in the last [`SIL_WINDOW_FRAMES`] frames before
+/// `limit`, expressed in samples. Falls back to `limit` when nothing in that
+/// window is quieter than the limit itself.
+fn quiet_cut(samples: &[f32], limit: usize, hop_size: usize) -> usize {
+    let mut best = limit;
+    let mut best_rms = f32::MAX;
+    // `(lo..limit)` never contains `limit`, so a constant-valued window keeps the
+    // fallback and the caller always advances by at least one frame
+    let lo = limit - (limit % hop_size).max(SIL_WINDOW_FRAMES * hop_size);
+    for f in (lo..limit).step_by(hop_size) {
+        let frame = &samples[f..(f + hop_size).min(samples.len())];
+        let rms = (frame.iter().map(|x| x * x).sum::<f32>() / frame.len().max(1) as f32).sqrt();
+        if rms < best_rms {
+            best_rms = rms;
+            best = f;
+        }
+    }
+    best
+}
+
+/// Split one slice into pieces no longer than [`MAX_ENCODER_SAMPLES`], cutting at
+/// the quietest frame inside the 100 ms before the limit.
+///
+/// Why not cut at the hard limit: a cut lands wherever the sampling happens to
+/// be, which is mid-note more often than not. Looking for the quietest frame
+/// only moves the cut *earlier*, never past the limit. Notes split by the cut
+/// are rejoined by the host's deoverlap pass before the MIDI is written.
+fn split_oversized(offset: f64, samples: Vec<f32>, sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
+    if samples.len() <= MAX_ENCODER_SAMPLES {
+        return vec![(offset, samples)];
+    }
+    let hop_size = HOP_SAMPLES * sample_rate as usize / SAMPLE_RATE as usize;
+    let limit = MAX_ENCODER_SAMPLES / hop_size * hop_size;
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    while samples.len() - start > MAX_ENCODER_SAMPLES {
+        let end = start + quiet_cut(&samples[start..], limit, hop_size);
+        out.push((
+            offset + start as f64 / sample_rate as f64,
+            samples[start..end].to_vec(),
+        ));
+        // `quiet_cut` 的返回值永远 > start（窗口不含 `limit` 本身），这条只是兜底：
+        // 切不动就按硬上限切，绝不能原地打转
+        start = if end > start { end } else { start + limit };
+    }
+    out.push((
+        offset + start as f64 / sample_rate as f64,
+        samples[start..].to_vec(),
+    ));
+    out
+}
+
 /// Split a long waveform into the slices GAME transcribes independently.
 ///
 /// Must match `inference/slicer2.py:Slicer.slice` line by line with the arguments
 /// `infer.py` passes (`threshold=-40 dB, min_length=1000 ms, min_interval=200 ms,
-/// max_sil_kept=100 ms, hop_size=20 ms`). The structure matters: only a *loud*
+/// `max_sil_kept=100 ms, hop_size=20 ms`). The structure matters: only a *loud*
 /// frame closes a silence run, `silence_start` is a single recorded position (not
 /// a list of runs), and `min_length` is counted in *frames* from `clip_start` —
 /// "find silent runs, then cut" yields different slices on real audio.
 /// Returns `(offset_seconds, samples)`, to be shifted back by `offset` when the
 /// MIDI is written (each slice carries `known_durations = [slice length]`).
+///
+/// The cuts above are upstream's; on top of them every slice longer than
+/// [`MAX_ENCODER_SAMPLES`] is additionally split by [`split_oversized`], which is
+/// why the returned offsets are not all silence positions.
 pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
     const THRESHOLD_DB: f32 = -40.0;
     const MIN_LENGTH_MS: f32 = 1000.0;
     const MIN_INTERVAL_MS: f32 = 200.0;
     const HOP_MS: f32 = 20.0;
-    const MAX_SIL_KEPT_MS: f32 = 100.0;
 
     let threshold = 10f32.powf(THRESHOLD_DB / 20.0);
     let hop_size = (sample_rate as f32 * HOP_MS / 1000.0).round() as usize;
@@ -376,13 +451,10 @@ pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
     let min_length =
         (sample_rate as f32 * MIN_LENGTH_MS / 1000.0 / hop_size as f32).round() as usize;
     let min_interval = (min_interval_samples / hop_size as f32).round() as usize;
-    let max_sil_kept =
-        (sample_rate as f32 * MAX_SIL_KEPT_MS / 1000.0 / hop_size as f32).round() as usize;
-
     // `(samples.shape[0] + hop - 1) // hop <= min_length` -> leave it whole.
     let hop_frames = (y.len() + hop_size - 1) / hop_size;
     if hop_frames <= min_length || y.is_empty() {
-        return vec![(0.0, y.to_vec())];
+        return split_oversized(0.0, y.to_vec(), sample_rate);
     }
 
     let rms = rms_frames(y, win_size, hop_size);
@@ -407,14 +479,14 @@ pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
             None => continue,
         };
 
-        let is_leading_silence = s == 0 && i > max_sil_kept;
+        let is_leading_silence = s == 0 && i > SIL_WINDOW_FRAMES;
         let need_slice_middle = i - s >= min_interval && i - clip_start >= min_length;
         if !is_leading_silence && !need_slice_middle {
             silence_start = None;
             continue;
         }
 
-        if i - s <= max_sil_kept {
+        if i - s <= SIL_WINDOW_FRAMES {
             let pos = argmin_range(&rms, s, i + 1).unwrap_or(s);
             if s == 0 {
                 sil_tags.push((0, pos));
@@ -422,15 +494,15 @@ pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
                 sil_tags.push((pos, pos));
             }
             clip_start = pos;
-        } else if i - s <= max_sil_kept * 2 {
+        } else if i - s <= SIL_WINDOW_FRAMES * 2 {
             // `argmin_range` already yields an *absolute* frame index, whereas
             // upstream's `rms_list[a:b].argmin()` yields an offset that then has
             // to be shifted back. Only the ranges that start at `s` (or that
             // need the `pos` comparison) are kept verbatim.
-            let pos = argmin_range(&rms, i.saturating_sub(max_sil_kept), s + max_sil_kept + 1)
+            let pos = argmin_range(&rms, i.saturating_sub(SIL_WINDOW_FRAMES), s + SIL_WINDOW_FRAMES + 1)
                 .unwrap_or(s);
-            let pos_l = argmin_range(&rms, s, s + max_sil_kept + 1).unwrap_or(s);
-            let pos_r = argmin_range(&rms, i.saturating_sub(max_sil_kept), i + 1).unwrap_or(s);
+            let pos_l = argmin_range(&rms, s, s + SIL_WINDOW_FRAMES + 1).unwrap_or(s);
+            let pos_r = argmin_range(&rms, i.saturating_sub(SIL_WINDOW_FRAMES), i + 1).unwrap_or(s);
             if s == 0 {
                 sil_tags.push((0, pos_r));
                 clip_start = pos_r;
@@ -439,8 +511,8 @@ pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
                 clip_start = pos_r.max(pos);
             }
         } else {
-            let pos_l = argmin_range(&rms, s, s + max_sil_kept + 1).unwrap_or(s);
-            let pos_r = argmin_range(&rms, i.saturating_sub(max_sil_kept), i + 1).unwrap_or(s);
+            let pos_l = argmin_range(&rms, s, s + SIL_WINDOW_FRAMES + 1).unwrap_or(s);
+            let pos_r = argmin_range(&rms, i.saturating_sub(SIL_WINDOW_FRAMES), i + 1).unwrap_or(s);
             if s == 0 {
                 sil_tags.push((0, pos_r));
             } else {
@@ -457,14 +529,14 @@ pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
     let total_frames = rms.len();
     if let Some(s) = silence_start {
         if total_frames - s >= min_interval {
-            let silence_end = total_frames.min(s + max_sil_kept);
+            let silence_end = total_frames.min(s + SIL_WINDOW_FRAMES);
             let pos = argmin_range(&rms, s, silence_end + 1).unwrap_or(s);
             sil_tags.push((pos, total_frames + 1));
         }
     }
 
     if sil_tags.is_empty() {
-        return vec![(0.0, y.to_vec())];
+        return split_oversized(0.0, y.to_vec(), sample_rate);
     }
 
     let apply = |begin: usize, end: usize| -> (f64, Vec<f32>) {
@@ -484,9 +556,12 @@ pub fn slice_waveform(y: &[f32], sample_rate: u32) -> Vec<(f64, Vec<f32>)> {
         chunks.push(apply(sil_tags[sil_tags.len() - 1].1, total_frames));
     }
     if chunks.is_empty() {
-        vec![(0.0, y.to_vec())]
+        split_oversized(0.0, y.to_vec(), sample_rate)
     } else {
         chunks
+            .into_iter()
+            .flat_map(|(o, s)| split_oversized(o, s, sample_rate))
+            .collect()
     }
 }
 
@@ -683,5 +758,43 @@ mod tests {
         let y = vec![0.0f32; 48000];
         let z = resample_linear(&y, 48000, 44100);
         assert_eq!(z.len(), 44100);
+    }
+
+    /// `encoder.onnx`'s rope tables are frozen at 5000 frames, so a slice longer
+    /// than that dies inside its Mul node with
+    /// `Attempting to broadcast an axis by a dimension other than 1. 5000 by N`
+    /// (reproduced on the real graph with a 60 s mono buffer). A continuous 3 min
+    /// vocal has no silence for the slicer to cut at, so it hands the encoder the
+    /// whole buffer; every returned piece must therefore stay under the limit and
+    /// the pieces must still tile the input in order, offsets included.
+    #[test]
+    fn long_slices_are_split_below_the_encoder_rope_limit() {
+        let sr = SAMPLE_RATE;
+        let n = sr as usize * 180;
+        // `sin` keeps every frame above the -40 dB silence threshold, so the
+        // slicer returns the buffer whole.
+        let y: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 0.05).sin() * 0.5)
+            .collect();
+        let slices = slice_waveform(&y, sr);
+
+        assert!(slices.len() >= 3, "3 分钟要切成至少 3 段：{}", slices.len());
+        let mut at = 0usize;
+        for (i, (offset, chunk)) in slices.iter().enumerate() {
+            assert!(
+                chunk.len() <= MAX_ENCODER_SAMPLES,
+                "第 {i} 段 {} 个采样点，超过 encoder 的 {}",
+                chunk.len(),
+                MAX_ENCODER_SAMPLES
+            );
+            let want_offset = at as f64 / sr as f64;
+            assert!(
+                (offset - want_offset).abs() < 1e-9,
+                "第 {i} 段的偏移 {offset} 与已消费的采样点对不上（应为 {want_offset}）"
+            );
+            assert_eq!(&y[at..at + chunk.len()], &chunk[..], "第 {i} 段的内容不是原音频的切片");
+            at += chunk.len();
+        }
+        assert_eq!(at, n, "切完必须正好覆盖整段音频");
     }
 }

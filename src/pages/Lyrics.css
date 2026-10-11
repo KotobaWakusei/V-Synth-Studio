@@ -65,6 +65,12 @@
     background: var(--lg-fill-quaternary);
 }
 
+/* 当前预览的那一条。同名歌在结果里有十几个版本，不标出来就分不清点的是哪一个 */
+.lyrics-result[data-current='true'] {
+    background: var(--lg-fill-tertiary);
+    box-shadow: inset 2px 0 0 var(--lg-accent);
+}
+
 .lyrics-result-text {
     flex: 1;
     min-width: 0;

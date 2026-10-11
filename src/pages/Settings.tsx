@@ -29,6 +29,8 @@ const SECTIONS = [
     {id: 'wallpaper', label: '壁纸'},
     {id: 'paths', label: '路径'},
     {id: 'tools', label: '外部工具'},
+    /* 「赞助」在「关于」之前：它要的是被看见（关于那一栏是署名与致谢，看到最后才轮到） */
+    {id: 'sponsor', label: '赞助'},
     {id: 'about', label: '关于'},
 ] as const
 
@@ -127,6 +129,7 @@ export function Settings({
                 {section === 'tools' && (
                     <Tools state={state} onRefreshState={onRefreshState} onToast={onToast}/>
                 )}
+                {section === 'sponsor' && <Sponsor/>}
                 {section === 'about' && (
                     <About state={state} onRefresh={reload} onNavigate={onNavigate} onToast={onToast}/>
                 )}
@@ -649,6 +652,54 @@ const LICENSES: { feature: string; upstream: string; href?: string; license: str
     },
 ]
 
+/**
+ * 赞助那一栏：一段话 + 两张收款码（微信 / 支付宝各一张）。
+ *
+ * 图片在 `public/img/sponsor*.jpg`，由 Vite 原样拷进 `dist/`（`public/` 下的东西
+ * 不走打包，路径就是 `/img/…`）。
+ *
+ * ⚠️ **两张码不能合并成一张**：微信只认微信的码、支付宝只认支付宝的（支付宝那张
+ * 图上还写着「推荐使用支付宝」），所以两张并排摆、各自带标题，用户扫之前看得出扫的是哪张。
+ *
+ * ⚠️ **码必须保持原本的白底**：它们是给手机摄像头扫的，跟着暗色主题走会扫不出来 ——
+ * 和 B 站扫码登录那块 `.qr-box` 同一条规矩（样式在 `Settings.css` 的 `.sponsor-code`）。
+ *
+ * 文案是作者的话，**不翻译**：与「关于作者」里那几段同一条规矩 —— 第一人称说给
+ * 赞助者的句子，用机器译成三种语言反而怪。
+ */
+function Sponsor() {
+    return (
+        <Panel>
+            <PanelHead title="赞助" desc="扫码赞赏 —— 记得备注 ID，会同步到「关于」里的感谢名单"/>
+            <div className="sponsor">
+                <p className="sponsor-words">
+                    软件的开发与运营几乎得靠你们赞助了。作者只是个学生，拿不出太多钱为爱发电，抱歉。
+                    有能力的希望可以赞助一下，记得备注 ID，会同步到感谢名单，谢谢！
+                </p>
+                {/* 左边是微信（`sponsor.jpg` 那张写着「赞赏码」），右边是支付宝。
+                    两张图的宽高比差很多（正方形 vs 竖长条），所以只约束宽度、让高度各自走 */}
+                <div className="sponsor-codes">
+                    <figure className="sponsor-card">
+                        <img className="sponsor-code" src="/img/sponsor.jpg" alt="微信赞赏码"/>
+                        <figcaption className="sponsor-caption">微信</figcaption>
+                    </figure>
+                    <figure className="sponsor-card">
+                        <img
+                            className="sponsor-code sponsor-code-alipay"
+                            src="/img/sponsor-alipay.jpg"
+                            alt="支付宝赞赏码"
+                        />
+                        <figcaption className="sponsor-caption">支付宝</figcaption>
+                    </figure>
+                </div>
+                <p className="sponsor-hint">
+                    右键（或长按）保存图片，用对应的应用扫一扫。
+                </p>
+            </div>
+        </Panel>
+    )
+}
+
 function About({
                    state,
                    onRefresh,
@@ -770,6 +821,13 @@ function About({
                 </div>
                 {updateErr && <p className="hint">{updateErr}</p>}
                 {update?.ok === false && <p className="hint">{update.error}</p>}
+                {/* 直连不通时后端会自动改走镜像：这件事要说出来，用户有权知道
+                    版本信息是第三方代答的（值由后端给，见 `update.rs` 的 `via`） */}
+                {update?.ok && update.via && update.via !== 'GitHub 直连' && (
+                    <p className="hint">
+                        {t('GitHub 直连不通，这次是经镜像代查的')}：{update.via}
+                    </p>
+                )}
                 {update?.ok && update.hasUpdate && (
                     <>
                         <Finding level="info" title={`${t('有新版本')}：${update.latest ?? ''}`}>

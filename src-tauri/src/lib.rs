@@ -20,6 +20,7 @@ mod lyrics;
 mod midi_transcribe;
 mod net;
 mod platform;
+mod reg;
 mod svsep;
 mod update;
 mod upgrade;
@@ -337,9 +338,15 @@ fn resolve_paths(
      * 那里当然有 data/resources.json，于是会被误判成安装版，
      * 配置就被写到 %APPDATA% 去了，而绿色版应该写在程序旁边的 data/。
      *
-     * 所以真正的判据是「程序目录能不能写」：
-     *   - 能写（绿色版、解压在用户目录）→ 配置放旁边，整个目录可以拷着走
-     *   - 不能写（装在 Program Files）→ 配置放 %APPDATA%
+     * 所以判据是「程序目录能不能写」，**但要再排除用户级的安装目录**：
+     *   - 程序在 `%LOCALAPPDATA%\<产品名>`（per-user 安装的落点）→ 安装版，配置走 %APPDATA%
+     *   - 在别处且能写（解压在桌面/别的盘）→ 绿色版，配置放旁边，整个目录可以拷着走
+     *   - 不能写（装在 Program Files）→ 安装版，配置走 %APPDATA%
+     *
+     * ⚠️ **`%LOCALAPPDATA%` 那一条不能省**：exe 安装包是 per-user 装到那里的，
+     * 而「程序目录可写」对它恒成立 —— 少了这一条，装完之后程序会把自己当成绿色版，
+     * 把配置写到 `<安装目录>\data\config.json`，于是「升级后设置全没了、扩展包默认
+     * 目录也变了」。它在 Windows 语义上就是**安装版**：那是放程序的地方，不是放数据的。
      *
      * ⚠️ **macOS 上不看可写位**：`.app` 拖进「应用程序」后归当前用户所有、目录
      * 也能写，照可写位判就会把配置写进 `Contents/Resources/data/` —— 那会改到
@@ -357,15 +364,25 @@ fn resolve_paths(
     }
     if let Some(rd) = root_from_resource {
         let local_data = rd.join("data");
-        if is_writable(&local_data) && !in_macos_bundle {
+        let portable =
+            is_writable(&local_data) && !in_macos_bundle && !in_user_install_dir(&rd, None);
+        if portable {
             return Some(AppPaths {
                 writable: local_data,
                 root: rd,
                 installed: false,
             });
         }
+        let writable = app_data_dir.unwrap_or_else(fallback_data_dir);
+        /* 记一行：程序目录可写但被判成安装版时，这一行是唯一能看出「为什么配置
+           没写在程序旁边」的地方（用户级安装落点，见 `in_user_install_dir`）。 */
+        crate::log_line(&format!(
+            "路径：程序目录 {} 可写，但它是安装落点 ⇒ 按安装版处理，配置写到 {}",
+            rd.display(),
+            writable.display()
+        ));
         return Some(AppPaths {
-            writable: app_data_dir.unwrap_or_else(fallback_data_dir),
+            writable,
             root: rd,
             installed: true,
         });
@@ -420,6 +437,28 @@ fn is_writable(dir: &Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// 这个程序目录是不是**用户级的安装落点**（`%LOCALAPPDATA%\<产品名>`）。
+///
+/// 只用来把「exe 安装包装出来的程序」和「用户自己解压的绿色版」分开：两者的
+/// 程序目录都可写，差别只在这个位置是**安装器**选的、还是用户选的。
+/// 绿色版解压在桌面、D 盘、下载目录都行，那里不是 `%LOCALAPPDATA%`。
+///
+/// `cwd` 是给单测注入的当前工作目录（`LOCALAPPDATA` 被抹掉时用它推），传 `None`
+/// 就自己去问系统。
+fn in_user_install_dir(dir: &Path, cwd: Option<&Path>) -> bool {
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| cwd.filter(|c| c.is_absolute()).map(Path::to_path_buf));
+    let Some(local) = local else {
+        return false;
+    };
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let local = std::fs::canonicalize(&local).unwrap_or(local);
+    // 只认直属子目录：`%LOCALAPPDATA%\v-synth-studio` 是安装落点，
+    // 而 `%LOCALAPPDATA%\Temp\某处解压的绿色版` 不是
+    dir.parent() == Some(local.as_path()) && dir.file_name().is_some()
 }
 
 /// Tauri 尚未给出 `app_data_dir` 时的兜底可写目录。
