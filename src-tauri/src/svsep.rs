@@ -1540,13 +1540,15 @@ async fn fetch_bundle(
            只让进度条难看一点，不影响成不成 —— 所以下面报进度时按总量夹一下，
            免得条子冲过 100%。 */
         let grand_total: u64 = b.parts.iter().map(|p| p.bytes).sum();
-        for (url, path) in &files {
-            // 已经下完的那几卷（分母里的偏移）。卷是按顺序下的，所以这里正好是前缀。
-            let before: u64 = paths
-                .iter()
-                .take_while(|p| *p != path)
-                .map(|p| file_size(p))
-                .sum();
+
+        /* ⚠️ **几卷一起下，不是一卷一卷来。** 实测（2026-10，那条 ~1.4 Mbit/s 的线路上）：
+           单连接 0.23 MB/s、六连接合计 0.60 MB/s —— 瓶颈是**每连接**的，串行下这几个 GB
+           要多花一倍多的时间；健康线路上多连接也是「更快」的那一侧（下载器都这么干）。
+           ⚠️ 并发度就是卷数（现在 6），**别再往上加**：再多对端就开始按 IP 限速了。
+           ⚠️ 进度是**各卷增量之和**：`got` 是**那一卷**的累计字节（续传时还含盘上已有的），
+           拿它当全局进度会让条子在几卷之间来回跳，所以每卷只把自己的增量累加进去。 */
+        let done = std::sync::atomic::AtomicU64::new(0);
+        let futs = files.iter().map(|(url, path)| {
             /* 真的去拉字节 —— 走 `crate::download`，与 bili 的视频下载共用同一份。
                这里只剩「这一卷在哪儿、叫什么」这两件**这个宿主特有**的事。 */
             let req = crate::download::Request {
@@ -1554,7 +1556,7 @@ async fn fetch_bundle(
                 label: b.label,
                 part: path,
                 headers: &[],
-                // 单流：这几 GB 的包要的是「断了能接着下」，不是并行
+                // 每一卷内部仍是单流：几 GB 的包要的是「断了能接着下」，不是卷内并行
                 shape: crate::download::Shape::Resumable,
                 client: crate::download::default_client(),
                 retry: crate::download::Retry::BIG_PACK,
@@ -1564,39 +1566,63 @@ async fn fetch_bundle(
                    EOCD / CRC 兜住。 */
                 expect: None,
             };
-            let note = |got: u64, _total: Option<u64>, _stage: Stage| {
-                on_progress((before + got).min(grand_total), Some(grand_total), Stage::Download)
-            };
-            match crate::download::download(&req, &control(ctl), &note).await {
+            let last = std::sync::atomic::AtomicU64::new(0);
+            let done = &done;
+            async move {
+                let note = |got: u64, _total: Option<u64>, _stage: Stage| {
+                    let d = got.saturating_sub(last.load(Ordering::Relaxed));
+                    last.store(got, Ordering::Relaxed);
+                    let n = done.fetch_add(d, Ordering::Relaxed) + d;
+                    on_progress(n.min(grand_total), Some(grand_total), Stage::Download);
+                };
+                let out = crate::download::download(&req, &control(ctl), &note).await;
+                (path.clone(), out)
+            }
+        });
+        let outcomes = futures_util::future::join_all(futs).await;
+
+        let leftover = |paths: &[PathBuf]| -> u64 { paths.iter().map(|p| file_size(p)).sum() };
+        let mut any_paused = false;
+        let mut first_err: Option<String> = None;
+        for (_, out) in outcomes {
+            match out {
                 Ok(crate::download::Outcome::Done { .. }) => {}
-                Ok(crate::download::Outcome::Paused { .. }) => {
-                    let done: u64 = paths.iter().map(|p| file_size(p)).sum();
-                    return Ok(FetchOutcome::Paused { bytes: done });
-                }
-                Ok(crate::download::Outcome::Cancelled) => {
-                    /* 停止 = 这个包不要了：**所有**分卷一起删。只删当前那一卷的话，
-                       界面上「已经下好 N」还挂着一半，用户下次点「继续下载」又接上。 */
-                    for (_, p) in &files {
-                        let _ = std::fs::remove_file(p);
-                        let _ = std::fs::remove_file(url_marker(p));
-                    }
-                    return Ok(FetchOutcome::Cancelled);
-                }
+                Ok(crate::download::Outcome::Paused { .. }) => any_paused = true,
+                // 「停止」统一由下面的 `ctl.cancelled()` 判，这里不重复处理
+                Ok(crate::download::Outcome::Cancelled) => {}
                 Err(e) => {
-                    /* ⚠️ 万一这一轮其实已经把整包下到手、只是收尾报了错：就地改判成
-                       「下完了」去解压。不改判的话，下次点「继续下载」会带着「整包长」
-                       的 Range 再发一次请求 —— 那是把几个 GB 从头下一遍。 */
-                    if pack_is_whole_zip(&paths) {
-                        break;
+                    if first_err.is_none() {
+                        first_err = Some(e);
                     }
-                    /* ⚠️ 失败时**不删** `.part`，记号也不删：删掉 = 用户得把几 GB 再下
-                       一遍（流量是他自己的）。留着的话界面会显示「已经下好 N，接着下」。 */
-                    let done: u64 = paths.iter().map(|p| file_size(p)).sum();
-                    return Err(format!(
-                        "{e}；已下的 {done} 字节留在盘上，下次点「继续下载」从这儿接着下"
-                    ));
                 }
             }
+        }
+
+        /* 停止 = 这个包不要了：**所有分卷一起删**。留下任何一卷，界面上「已经下好 N」
+           就还挂着一半，用户下次点「继续下载」又接上。 */
+        if ctl.cancelled() {
+            for (_, p) in &files {
+                let _ = std::fs::remove_file(p);
+                let _ = std::fs::remove_file(url_marker(p));
+            }
+            return Ok(FetchOutcome::Cancelled);
+        }
+        if let Some(e) = first_err {
+            /* ⚠️ 万一这一轮其实已经把整包下到手、只是收尾报了错：就地改判成「下完了」
+               去解压。不改判的话，下次点「继续下载」会带着「整包长」的 Range 再发一次
+               请求 —— 那是把几个 GB 从头下一遍。 */
+            if !pack_is_whole_zip(&paths) {
+                /* ⚠️ 失败时**不删** `.part`，记号也不删：删掉 = 用户得把几 GB 再下一遍
+                   （流量是他自己的）。留着的话界面会显示「已经下好 N，接着下」。 */
+                return Err(format!(
+                    "{e}；已下的 {} 字节留在盘上，下次点「继续下载」从这儿接着下",
+                    leftover(&paths)
+                ));
+            }
+        } else if any_paused {
+            return Ok(FetchOutcome::Paused {
+                bytes: leftover(&paths),
+            });
         }
     }
 
@@ -3117,6 +3143,134 @@ mod tests {
             "留下的半个包认不出来（`resume_point` 拿不到断点）"
         );
 
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// **六卷并发**下 + 拼装 + 解压的端到端（本地起个服务器托着那六卷）。
+    ///
+    /// 为什么必须有这一条：几卷并发是**实测逼出来的**（同一条线路上单连接 0.23 MB/s、
+    /// 六连接合计 0.60 MB/s），而并发一旦写错，症状是「进度条在几卷之间乱跳」「暂停留下
+    /// 半数卷」「某一卷谁也没去下」—— 单卷那条路径（`Bundle::models`）一条都盖不到。
+    ///
+    /// ⚠️ 它靠 `VSS_MODULES_BASE` 把发布点顶到本地服务器上（只有 debug 构建认）。
+    /// 那是**进程级**的环境变量，所以这里改完立刻改回来 —— 同一进程里别的测试也会问
+    /// `release_base()`。
+    #[tokio::test]
+    async fn the_six_volumes_are_fetched_concurrently() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::AtomicUsize;
+
+        let zip = make_zip(&[
+            ("runtime/python.exe", b"python-exe", true),
+            ("backend/app.py", b"print(1)", true),
+            ("bin/ffmpeg.exe", b"ffmpeg-exe", true),
+            ("runtime/Lib/x.dll", &[7u8; 60_000], false),
+        ]);
+        // 切成六份，名字与表里一致（按字节切，正是 `tools/split_volumes.mjs` 干的事）
+        let chunk = zip.len().div_ceil(RUNTIME_PARTS.len());
+        let served: Vec<(String, Vec<u8>)> = RUNTIME_PARTS
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let from = (i * chunk).min(zip.len());
+                let to = ((i + 1) * chunk).min(zip.len());
+                (p.name.to_string(), zip[from..to].to_vec())
+            })
+            .collect();
+
+        let inflight = std::sync::Arc::new(AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(AtomicUsize::new(0));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        {
+            let (inflight, peak) = (inflight.clone(), peak.clone());
+            std::thread::spawn(move || {
+                for conn in listener.incoming() {
+                    let Ok(mut s) = conn else { continue };
+                    let (inflight, peak) = (inflight.clone(), peak.clone());
+                    let served = served.clone();
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 4096];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let want = head
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("/")
+                            .trim_start_matches('/')
+                            .to_string();
+                        let body = served
+                            .iter()
+                            .find(|(name, _)| *name == want)
+                            .map(|(_, b)| b.clone())
+                            .unwrap_or_default();
+                        let now = inflight.fetch_add(1, Ordering::AcqRel) + 1;
+                        peak.fetch_max(now, Ordering::AcqRel);
+                        // 慢一点：让六条请求真的叠在一起，否则「并发」根本验不出来
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\
+                             Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = s.write_all(resp.as_bytes());
+                        let _ = s.write_all(&body);
+                        let _ = s.flush();
+                        inflight.fetch_sub(1, Ordering::AcqRel);
+                    });
+                }
+            });
+        }
+
+        let dest = std::env::temp_dir().join("vss-svsep-parallel-vols");
+        let _ = std::fs::remove_dir_all(&dest);
+        // SAFETY: 这一条测试自己负责把变量改回来；同时问它的只有 release_base()
+        unsafe { std::env::set_var("VSS_MODULES_BASE", format!("http://127.0.0.1:{port}")) };
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        /* 下载段与解压段的**分母不是一回事**（解压报的是各条目压缩后大小之和），所以分开记
+           —— 只留最后一个 `total` 会拿到解压那个数，看着像「分母错了」。 */
+        let seen = std::sync::Arc::new(Mutex::new((0u64, 0u64, 0usize, 0usize)));
+        let seen2 = seen.clone();
+        let out = download_runtime(&dest, &ctl, move |got, total, stage| {
+            let mut s = seen2.lock().unwrap();
+            if stage == Stage::Extract {
+                s.3 += 1;
+            } else {
+                s.0 = s.0.max(got);
+                if let Some(t) = total {
+                    s.1 = t;
+                }
+                s.2 += 1;
+            }
+        })
+        .await
+        .expect("六卷并发下载失败");
+        unsafe { std::env::remove_var("VSS_MODULES_BASE") };
+
+        assert!(matches!(out, FetchOutcome::Done(_)), "没下完：{out:?}");
+        assert!(runtime_ready(&dest), "六卷下完解完却不算就绪");
+        let (max_got, dl_total, dl_ticks, ex_ticks) = *seen.lock().unwrap();
+        assert!(
+            peak.load(Ordering::Acquire) >= 2,
+            "六卷没有并发（峰值并发 {}）",
+            peak.load(Ordering::Acquire)
+        );
+        assert!(dl_ticks > 10, "下载进度回调只有 {dl_ticks} 次，像是没真下");
+        assert!(ex_ticks > 0, "一次解压回调都没有 —— 六卷没被当成一个 zip 解");
+        assert_eq!(dl_total, RUNTIME_ZIP_BYTES, "进度分母该是表里六卷之和");
+        assert!(
+            max_got >= zip.len() as u64,
+            "进度累计 {max_got} 少于整包 {} —— 各卷增量没加全",
+            zip.len()
+        );
+        // 六卷与记号都该收拾干净
+        for (_, p) in Bundle::runtime(&dest).files() {
+            assert!(!p.exists(), "下完还留着分卷：{}", p.display());
+            assert!(!url_marker(&p).exists(), "下完还留着记号：{}", p.display());
+        }
         let _ = std::fs::remove_dir_all(&dest);
     }
 
