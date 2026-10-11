@@ -121,16 +121,13 @@ jobs:
       - name: 装前端依赖
         run: pnpm install --frozen-lockfile
 
-      # ffmpeg 的 macOS / Linux 档都是 `.tar.xz`，而 Node 没有 liblzma（见 tools/archive.mjs）
-      # —— 解它要系统的 `xz`。两个镜像里通常都自带，没有就各自装一个
-      # （`brew` 在 arm64 上是 /opt/homebrew，别写死路径）。
+      # ffmpeg 的 macOS 档是 `.tar.xz`，而 Node 没有 liblzma（见 tools/archive.mjs）——
+      # 解它要系统的 `xz`。镜像里通常自带，没有就装一个（`brew` 在 arm64 上是
+      # /opt/homebrew，别写死路径）。Linux 不需要这一步：deb 不带 ffmpeg，
+      # 没有要解的 `.tar.xz`（其余随包件全是 zip / tgz / 裸二进制）。
       - name: 确保有 xz（解 ffmpeg 的 .tar.xz 用）
         if: runner.os == 'macOS'
         run: command -v xz >/dev/null || brew install xz
-
-      - name: 确保有 xz（解 ffmpeg 的 .tar.xz 用）
-        if: runner.os == 'Linux'
-        run: command -v xz >/dev/null || sudo apt-get install -y xz-utils
 
       # Tauri 的 Linux 链接依赖（webkit2gtk 那一串）。镜像里不预装，缺一个就链接失败。
       - name: 装 Linux 系统依赖

@@ -134,17 +134,19 @@ function smokeLinux() {
     // 出问题时第一眼要看的就是这棵树，先打一层
     for (const rel of walkFiles(LIB).map((f) => path.relative(work, f)).sort().slice(0, 25)) say(rel)
 
-    // ① `bundle.resources` 真去装的那几项 + 程序本体。
+    // ① `bundle.resources` 真去装的那几项 + 程序本体。ffmpeg 不在其中：
+    //    Linux 的 ffmpeg 来自系统仓库（deb 的 Depends），deb 里不该有它。
     const need = [
       'usr/bin/v-synth-studio',
       'usr/lib/v-synth-studio/data/resources.json',
       'usr/lib/v-synth-studio/data/pinyin.json',
-      'usr/lib/v-synth-studio/tools/ffmpeg/bin/ffmpeg',
       'usr/lib/v-synth-studio/tools/yt-dlp',
       'usr/lib/v-synth-studio/tools/libresvip/libresvip-cli/libresvip-cli',
       'usr/lib/v-synth-studio/tools/onnxruntime/libonnxruntime.so',
     ]
     for (const rel of need) check(fs.existsSync(path.join(work, rel)), `deb 里少了 ${rel}`)
+    check(!fs.existsSync(path.join(LIB, 'tools/ffmpeg')),
+      'deb 里不该有 tools/ffmpeg —— Linux 的 ffmpeg 来自系统仓库（fetch_tools 在 Linux 上不补它）')
 
     // ② LibreSVIP 的插件目录不能是空壳（exe 在、插件没在 = 工程格式互转认不出任何格式，且不报错）。
     const plugins = path.join(LIB, 'tools/libresvip/libresvip-cli/_internal/libresvip/plugins')
@@ -153,7 +155,7 @@ function smokeLinux() {
     check(n > 50, `插件只有 ${n} 个文件，明显少打包了`)
 
     // ③ 随包二进制必须是 x86_64。取错架构在编译期看不出来，到用户手里才现形。
-    for (const b of [BIN, path.join(LIB, 'tools/ffmpeg/bin/ffmpeg'), path.join(LIB, 'tools/yt-dlp'),
+    for (const b of [BIN, path.join(LIB, 'tools/yt-dlp'),
                      path.join(LIB, 'tools/libresvip/libresvip-cli/libresvip-cli'),
                      path.join(LIB, 'tools/onnxruntime/libonnxruntime.so')]) {
       const r = spawnSync('file', [b], {encoding: 'utf8'})
@@ -166,12 +168,7 @@ function smokeLinux() {
     check(sz > 40_000_000, '太小，前端/jizura 没嵌进去')
 
     // ⑤ **真把它们跑一遍**：架构对不对、动没动态库、解出来完不完整，只有真执行才知道。
-    const FF = path.join(LIB, 'tools/ffmpeg/bin/ffmpeg')
-    say(head(run(FF, ['-version']).out, 1))
-    const encs = run(FF, ['-hide_banner', '-encoders']).out
-    for (const e of ['libmp3lame', 'libopus', 'libvorbis', 'aac', 'flac']) {
-      check(new RegExp(`[\\s]${e}[\\s]`).test(encs), `ffmpeg 里没有 ${e}`)
-    }
+    //    ffmpeg 不在包里（系统仓库提供），编码器判据只对 Windows / macOS 的随包副本有意义。
     say(run(path.join(LIB, 'tools/yt-dlp'), ['--version']).out.trim())
     // LibreSVIP 是 Python 打包出来的，真跑一次才验得出 `_internal/` 解完整了没有。
     const rpc = run(path.join(LIB, 'tools/libresvip/libresvip-cli/libresvip-cli'), ['plugin', 'detail', 'svp'])

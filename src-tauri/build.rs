@@ -70,9 +70,9 @@ const LINUX: &str = "linux";
 const MUST_HAVE: &[(&str, &str, &str)] = &[
     ("../data/resources.json", "资源库清单（resolve_paths 的启动哨兵）", ANY),
     ("../data/pinyin.json", "拼音词典", ANY),
+    // ffmpeg 没有 Linux 行：deb 不带它（Depends 装系统包），MUST_HAVE 只查随包物
     ("../tools/ffmpeg/bin/ffmpeg.exe", "ffmpeg（音频转换 / 合并 / 扒谱解码）", WIN),
     ("../tools/ffmpeg/bin/ffmpeg", "ffmpeg（同左，macOS 版）", MAC),
-    ("../tools/ffmpeg/bin/ffmpeg", "ffmpeg（同左，Linux 版）", LINUX),
     ("../tools/yt-dlp.exe", "yt-dlp（MV 解析下载）", WIN),
     ("../tools/yt-dlp", "yt-dlp（同左，macOS 版）", MAC),
     ("../tools/yt-dlp", "yt-dlp（同左，Linux 版）", LINUX),

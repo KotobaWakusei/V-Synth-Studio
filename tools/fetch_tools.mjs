@@ -65,19 +65,14 @@ const UPSTREAM = {
   // lgpl 全都有。gpl 档多带 x264/x265，而程序从不编码视频（6 处调用都是 `-vn`）。
   ffmpeg: {
     windows: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip',
-    /* 与 macOS 档同理：只吃 lgpl，且是 `.tar.xz`（解它要系统 `xz`）。
-       ⚠️ 按架构分列 —— linux64 与 linuxarm64 是两个不同的构建，取错了到用户机器上才现形。 */
-    linux: {
-      x64: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz',
-      arm64: 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linuxarm64-lgpl.tar.xz',
-    },
     /* BtbN 不出 macOS 档，而 macOS 上的静态构建几乎都是 GPL。挑 jellyfin-ffmpeg 的可携包：
        GitHub 上钉 tag、全功能（它本来就是给转码用的），本程序要的 `atempo` / `asetrate` /
        `loudnorm` / mp4 与 matroska 的拆与合都在里面。
        ⚠️ 别换成为省体积的「纯音频」构建（acoustid 那档 LGPL）：它没有那几个滤镜，
        变调变速与响度归一化会直接失败。
        ⚠️ 许可是 GPL —— 与本程序（GPL-3.0）同系，随包分发无冲突（见 docs/THIRD-PARTY-NOTICES.md）。
-       ⚠️ 它是 `.tar.xz`：解它要系统的 `xz`（Node 没有 liblzma）。 */
+       ⚠️ 它是 `.tar.xz`：解它要系统的 `xz`（Node 没有 liblzma）。
+       Linux 没有这里的位置：deb 不带 ffmpeg，由系统仓库提供（见 `PARTS_THIS_PLATFORM`）。 */
     macos: {
       arm64: 'https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-1/jellyfin-ffmpeg_8.1.3-1_portable_macarm64-gpl.tar.xz',
       x64: 'https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v8.1.3-1/jellyfin-ffmpeg_8.1.3-1_portable_mac64-gpl.tar.xz',
@@ -165,6 +160,13 @@ const PARTS = {
   onnxruntime: {what: 'ONNX Runtime（人声转 MIDI 的推理运行时）'},
 }
 
+/* ffmpeg 不进 Linux 的 deb：各发行版仓库都有，deb 的 Depends 声明它、安装时由
+   包管理器自动带上；运行期认不到随包副本就退回系统 PATH。其余三件仍随包 ——
+   yt-dlp 要跟着站点改版走（发行版版本普遍落后），LibreSVIP 与 onnxruntime
+   不在任何发行版的仓库里。 */
+const PARTS_THIS_PLATFORM =
+  Object.keys(PARTS).filter((n) => n !== 'ffmpeg' || PLATFORM !== 'linux')
+
 /** 某件产物在本平台下的相对落点（Windows 加 `.exe`；`onnxruntime` 换动态库名）。 */
 function needRel(name) {
   const dll = {windows: 'onnxruntime.dll', macos: 'libonnxruntime.dylib'}[PLATFORM] || 'libonnxruntime.so'
@@ -249,7 +251,7 @@ export async function fetchTools(tmp, force, root, only = null, local = null) {
   const base = destOf(assets.byId('tools'), root)
   mkdirp(base)
 
-  const todo = only === null ? Object.keys(PARTS) : Object.keys(PARTS).filter((n) => only.includes(n))
+  const todo = only === null ? PARTS_THIS_PLATFORM : PARTS_THIS_PLATFORM.filter((n) => only.includes(n))
   let missing = todo.filter((name) => force || !isFile(path.join(base, needRel(name))))
   if (missing.length === 0) {
     say(`  ${todo.join(' / ')} 都已在，跳过`)
@@ -406,9 +408,9 @@ export async function main(argv = process.argv.slice(2)) {
 
   const want = a.only.split(',').filter(Boolean)
   if (!(want.length === 1 && want[0] === 'all')) {
-    const unknown = want.filter((x) => !(x in PARTS))
+    const unknown = want.filter((x) => !PARTS_THIS_PLATFORM.includes(x))
     if (unknown.length) {
-      say(`不认识的件：${unknown}（可选：${Object.keys(PARTS)}）`)
+      say(`不认识的件：${unknown}（本平台可选：${PARTS_THIS_PLATFORM.join('、')}）`)
       return 1
     }
   }

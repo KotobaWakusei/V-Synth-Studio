@@ -125,7 +125,9 @@ export const ARTIFACTS = [
     into: `${ROOT}/tools`,
     strip: '',
     need: [
-      need(`ffmpeg/bin/${exeName('ffmpeg')}`),
+      /* Linux 的 deb 不带 ffmpeg：发行版仓库都有，deb 的 Depends 在安装时自动带上
+         （`tauri.conf.json` 的 `bundle.linux.deb.depends`），所以这一行只列另两端。 */
+      ...(PLATFORM === 'linux' ? [] : [need(`ffmpeg/bin/${exeName('ffmpeg')}`)]),
       need(exeName('yt-dlp')),
       need(`libresvip/libresvip-cli/${exeName('libresvip-cli')}`),
       need('libresvip/libresvip-cli/_internal/libresvip/plugins', null, 'dir', 1),

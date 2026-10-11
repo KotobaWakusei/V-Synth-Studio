@@ -69,7 +69,12 @@
       "signingIdentity": "-",
       "hardenedRuntime": false
     },
+    "linux": {
+      "deb": {
+        "depends": ["ffmpeg"]
+      }
+    },
     "shortDescription": "翻调 P 主的本地工作台",
-    "longDescription": "工程格式互转、MV 解析下载、人声分离、资源导航。完全离线运行。工具（ffmpeg / yt-dlp / LibreSVIP）随包分发，不需要联网下载。"
+    "longDescription": "工程格式互转、MV 解析下载、人声分离、资源导航。完全离线运行。工具随包分发，不需要联网下载（Linux 例外：ffmpeg 来自系统仓库，deb 的 Depends 在安装时自动带上）。"
   }
 }
