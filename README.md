@@ -32,13 +32,18 @@
 - `v-synth-studio_x.y.zbeta_x64_zh-CN.msi` —— Windows，双击安装（推荐）
 - `v-synth-studio_x.y.z_x64-setup.exe` —— 同一个程序的 exe 安装程序，按用户安装、不需要管理员
 - `v-synth-studio_x.y.zbeta_aarch64.dmg` —— macOS（Apple Silicon / M 系列），拖进「应用程序」
+- `v-synth-studio_x.y.zbeta_amd64.deb` —— Linux（x86_64，Debian 系），`sudo apt install ./…deb` 或双击由软件中心装
 
 > 安装包**没有代码签名**：Windows 第一次运行会看到一次 SmartScreen 提示，点「更多信息」→「仍要运行」；
-> macOS 是 ad-hoc 签名，第一次要**右键 →「打开」**（或到「系统设置 → 隐私与安全性 →「仍要打开」」）。
+> macOS 是 ad-hoc 签名，第一次要**右键 →「打开」**（或到「系统设置 → 隐私与安全性 →「仍要打开」」）；
+> Linux 的 deb 不签名，装的时候 apt 会按 control 里的依赖自动拉齐 webkit2gtk 等运行库。
 >
-> **macOS 版暂时没有这三样**：背景壁纸（Wallpaper Engine 没有 macOS 版）、离线音轨分离引擎、
-> 以及显卡加速（DirectML 是 Windows 的 API，CUDA 在 macOS 上不存在）。界面上它们会置灰并写明原因；
+> **macOS / Linux 版暂时没有这两样**：背景壁纸（Wallpaper Engine 只有 Windows 版）与
+> 离线音轨分离引擎（运行时是 Windows 专属）。界面上它们会置灰并写明原因；
 > 在线 MVSEP 与其余功能不受影响。
+>
+> **显卡加速**：Windows 的 A 卡 / 核显走 DirectML、N 卡走 CUDA，Linux 的 N 卡走 CUDA，
+> macOS 没有 CUDA、只有 CPU。另外 macOS / Linux 没有统一的回收站 API，「删除」即彻底删除。
 >
 > 装完只有「外部工具」是齐的。**音轨分离**和**人声转 MIDI** 的引擎与模型不随包分发（合计约
 > 8 GB，其中模型权重是非商业许可、不允许随源码分发）——在对应页面点「安装扩展包」按需下载，
