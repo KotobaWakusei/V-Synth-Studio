@@ -1,7 +1,7 @@
-import {useEffect, useMemo, useRef, useState} from 'react'
+import {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react'
 import {GlassSegmentedControl, GlassSwitch} from '@ttqtt/liquid-glass-react'
 import {api} from '@/lib/api'
-import {saveConfig} from '@/lib/config'
+import {getConfig, onConfigChange, saveConfig, syncConfig} from '@/lib/config'
 import {baseName, errText} from '@/lib/format'
 import {Button} from '@/components/Button'
 import {Credit, Upstream} from '@/components/Credit'
@@ -169,6 +169,19 @@ function alignTrans(text: string | null | undefined): (ms: number) => string {
 const fmtDuration = (sec?: number): string =>
     sec ? `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}` : ''
 
+/**
+ * 配置里跟登录态有关的那几项。
+ *
+ * ⚠️ **必须订阅配置存储，不能只读 `state.config`**：手机号登录 / 退出登录 / 续期这三条
+ * 命令是**后端**自己写 `config.json` 的，前端内存那份要等下一次 `get_state` 才对得上，
+ * 而歌词页的登录徽章与「退出登录」按钮都按它显示 —— 不订阅就会出现「刚登录成功，
+ * 界面还写着未登录」。`state` 那份仍是启动时的快照，只当兜底。
+ */
+function useNeteaseAuth() {
+    const cfg = useSyncExternalStore(onConfigChange, getConfig, getConfig)
+    return {cookie: String(cfg.neteaseCookie ?? ''), expireAt: Number(cfg.neteaseCookieExpire ?? 0)}
+}
+
 /* ══════════════════════════════════════════════════════════════════ 视图 ══ */
 
 export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) {
@@ -213,9 +226,8 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     const [loginTone, setLoginTone] = useState<ToastTone>('warn')
     const [busy, setBusy] = useState(false)
     const [nickname, setNickname] = useState('')
-    /** 会员标签（「黑胶SVIP·肆」）与 MUSIC_U 的过期时间，跟着 `lyricsAccount` 走 */
+    /** 会员标签（「黑胶SVIP·肆」）跟着 `lyricsAccount` 走；有效期读配置存储 */
     const [vip, setVip] = useState('')
-    const [expireAt, setExpireAt] = useState(0)
     /**
      * 服务端明确说凭据失效了（`lyricsAccount` 的 `expired`）—— 界面据此置为未登录。
      *
@@ -225,6 +237,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     const [authExpired, setAuthExpired] = useState(false)
     const [renewing, setRenewing] = useState(false)
     const [neteaseCookie, setNeteaseCookie] = useState('')
+    const {cookie: storedCookie, expireAt} = useNeteaseAuth()
 
     /**
      * `edited` —— 用户手动改过输出目录之后，设置页里的默认值不再盖掉它。
@@ -254,10 +267,10 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
         }
     }, [])
 
-    /* 登录态校验 + 临近过期自动续期。挂在挂载时跑一次就够 —— 跟着 `state` 刷新反复打接口
-       没有意义，而「登录态有没有过期」这件事一天变一次。config 只在首帧读，故意不进依赖。 */
+    /* 登录态校验 + 临近过期自动续期。挂在挂载时跑一次就够 —— 之后每次登录 / 保存 Cookie /
+       续期都由那几条命令自己刷，反复打接口没有意义，而「登录态有没有过期」一天变一次。 */
     useEffect(() => {
-        if (!config.neteaseCookie) return
+        if (!storedCookie) return
         void refreshAccount({renew: true})
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
@@ -537,7 +550,6 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                 setAuthExpired(false)
                 setNickname(a.nickname ?? '')
                 setVip(a.vip ?? '')
-                setExpireAt(a.expiresAt ?? 0)
                 // 临近过期就顺手续一次（该不该续由后端算好）。续期失败只是「这次没续上」，不影响登录态
                 if (opts?.renew && a.shouldRenew) void renewLogin()
             } else if (a.state === 'expired') {
@@ -545,7 +557,6 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
                 setAuthExpired(true)
                 setNickname('')
                 setVip('')
-                setExpireAt(0)
                 setMsg('网易云的登录态已经失效，请重新登录（扫码不可用，用短信验证码或换一条 Cookie）。', 'warn')
             }
             // offline / anonymous 什么都不做：前者是网络问题，后者本来就该是空
@@ -561,8 +572,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             const r = await api.lyricsRenew()
             // 续期成功说明服务端又认这个账号了，把「已失效」摘掉
             setAuthExpired(false)
-            setExpireAt(r.expiresAt ?? 0)
             if (r.vip) setVip(r.vip)
+            // 新有效期与换发后的凭据都在后端盘上：同步进前端那份，界面才显示得对
+            await onRefreshState()
             onToast('网易云登录已续期', 'ok')
         } catch (e) {
             onToast(`续期没成功：${errText(e)}（不影响当前登录）`, 'warn')
@@ -572,7 +584,7 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
     }
 
     /** 本地还存着凭据（哪怕服务端已经说它失效）—— 「续期 / 退出登录」按它显示 */
-    const hasCookie = !!config.neteaseCookie
+    const hasCookie = !!storedCookie
     /** 状态徽章按它显示：凭据在**且**服务端没说它失效 */
     const loggedIn = hasCookie && !authExpired
 
@@ -621,7 +633,9 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             setAuthExpired(false)
             setNickname(res.nickname ?? '')
             setVip(res.vip ?? '')
-            setExpireAt(res.expiresAt ?? 0)
+            // 凭据与有效期是**后端**写进 config.json 的：把后端那份同步进内存，
+            // 徽章才会从「未登录」变成「已登录为 …」（见 `useNeteaseAuth` 的说明）
+            await onRefreshState()
             // 会员标签跟昵称一起报出来（「已登录为 xxx（黑胶SVIP·肆）」）——
             // 它直接影响能拿到哪一档音质，用户看一眼就知道无损为什么拿不到
             const who = [res.nickname, res.vip].filter(Boolean).join('（')
@@ -649,10 +663,10 @@ export function Lyrics({state, onNavigate, onRefreshState, onToast}: PageProps) 
             await api.lyricsLogout('netease')
             setNickname('')
             setVip('')
-            setExpireAt(0)
             setAuthExpired(false)
-            await onRefreshState()
             setNeteaseCookie('')
+            // 后端已经落盘了：把这一份同步进内存，徽章立刻变回「未登录」
+            await onRefreshState()
             setMsg('已退出登录。', 'ok')
             onToast('已退出登录', 'ok')
         } catch (e) {

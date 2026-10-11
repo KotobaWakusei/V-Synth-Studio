@@ -1,6 +1,6 @@
 import {type ReactNode, Suspense, lazy, useCallback, useEffect, useRef, useState} from 'react'
 import {api, type UpdateCheck} from '@/lib/api'
-import {getConfig, onConfigError, saveConfig} from '@/lib/config'
+import {type AppConfig, getConfig, onConfigError, saveConfig, syncConfig} from '@/lib/config'
 import {useI18n} from '@/lib/i18n'
 import type {AppState} from '@/lib/types'
 import {Icon, type IconName} from '@/components/Icon'
@@ -114,7 +114,12 @@ export default function App() {
     const refreshState = useCallback(async () => {
         setRefreshing(true)
         try {
-            setState(await api.state())
+            const next = await api.state()
+            setState(next)
+            /* 后端可能自己改过配置：手机号登录、退出登录、续期都把凭据写进 config.json，
+               而它们不走 `saveConfig`。不灌回内存那份，歌词页的登录徽章就一直是旧的
+               （见 `lib/config.ts::syncConfig`）。 */
+            syncConfig(next.config as AppConfig | undefined)
             setDead(null)
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e)
