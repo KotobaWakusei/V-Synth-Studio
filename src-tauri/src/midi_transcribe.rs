@@ -48,6 +48,9 @@ use crate::game::{algo, engine};
 /// 每个都校验实测字节数（清单在 `tools/assets.mjs` 的 `game.models` 那条）。
 const GAME_ZIP: &str = "GAME-1.0.3-large-onnx.zip";
 
+/// 这个包里那个**认包的条目** —— 手放的包按它认（不看文件名，见 `manual_zip`）。
+const GAME_ENTRY: &str = "GAME-1.0.3-large-onnx/encoder.onnx";
+
 /// 整包大小，只用来显示与校验「下完没有」。实测值。
 ///
 /// 上游那份是 361,619,205 B；自建包（`tools/pack_assets.mjs`，`Optimal` 档）
@@ -628,9 +631,15 @@ pub fn status(root: &Path, writable: &Path) -> Value {
             "zipBytes": MODEL_ZIP_BYTES,
             "extractBytes": MODEL_BYTES,
             "partBytes": leftover("game-models.part"),
+            /* 用户手放的包（123 云盘下完直接丢进目录的那种）—— 界面据此把按钮写成
+               「解压」。空数组 = 没有。 */
+            "manual": manual_files(writable),
         },
         "license": "模型权重 CC BY-NC-SA 4.0（非商业）",
         "source": "https://github.com/openvpi/GAME",
+        /* 扩展包根：界面上那行「下得慢就自己去网盘下」要显示它，而且**用户改了落点它跟着变**
+           （与音轨分离页显示的是同一个根，见 `lib/extDir.tsx`）。 */
+        "extDir": crate::platform::clean_path(&crate::artifact::ext_of(writable)),
         "device": {
             "mode": ds.device.as_str(),
             "cuda": { "ok": ds.cuda_ok, "detail": ds.cuda_detail },
@@ -660,6 +669,9 @@ pub fn status(root: &Path, writable: &Path) -> Value {
 ///
 /// `on_progress(已下字节, 可选总字节, 阶段)`，阶段 `"download"` / `"extract"`，
 /// 与音轨分离那份状态形状一致，前端两个页面可以共用同一套进度条。
+///
+/// ⚠️ **盘上有用户手放的包就直接解它**（浏览器从 123 云盘下下来丢进目录的那种，
+/// 见 [`manual_zip`]）—— 一个字节都不下。界面那时把按钮写成「解压」。
 pub async fn download_models(
     writable: &Path,
     ctl: &crate::svsep::DownloadCtl,
@@ -667,18 +679,7 @@ pub async fn download_models(
 ) -> Result<Value, String> {
     let dir = data_dir(writable);
     std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败：{e}"))?;
-    let zip = dir.join("game-models.part");
 
-    crate::svsep::fetch_to_file(
-        &model_url(),
-        &zip,
-        Some(MODEL_ZIP_BYTES),
-        ctl,
-        // ⚠️ `fetch_to_file` 的回调是**三参**的（`got, total, Stage`），阶段它自己带 ——
-        // 别再手工把 `Stage::Download` 塞进去，那样后面解压那一段没有进度。
-        &|got, total, stage| on_progress(got, total, stage),
-    )
-    .await?;
     /* 落到**扩展包根下的 `game/models`**。
     ⚠️ 不要图省事写 `data_dir(writable)`（那是 `midi/`）：下载能成功、解包能成功，
     唯独 `artifact::dir_of(root, writable, "game.models")` 找不到它 —— 用户点「开始扒谱」时才报
@@ -699,8 +700,29 @@ pub async fn download_models(
     ⚠️ 剥错不会报错，只会在用户点「开始扒谱」时才现形：「模型没下全」。
     前缀必须与包的中央目录里那个顶层目录**逐字相同**。 */
     let strip = "GAME-1.0.3-large-onnx/";
+
+    let manual = manual_zip(&[&dest, &crate::artifact::ext_of(writable)]);
+    let zip = match manual {
+        Some(z) => z,
+        None => {
+            let tmp = dir.join("game-models.part");
+            crate::svsep::fetch_to_file(
+                &model_url(),
+                &tmp,
+                Some(MODEL_ZIP_BYTES),
+                ctl,
+                // ⚠️ `fetch_to_file` 的回调是**三参**的（`got, total, Stage`），阶段它自己带 ——
+                // 别再手工把 `Stage::Download` 塞进去，那样后面解压那一段没有进度。
+                &|got, total, stage| on_progress(got, total, stage),
+            )
+            .await?;
+            tmp
+        }
+    };
     let report = crate::svsep::unpack(&zip, &dest, strip, &on_progress)?;
+    // 解完才删：手放的那份也一样（已经装进 `dest` 了，压着它只是占 364 MB）
     let _ = std::fs::remove_file(&zip);
+    let _ = std::fs::remove_file(crate::download::url_marker(&zip));
 
     // 校验「**解出来的这个目录**里齐不齐」（不是「这台机器上有没有」）
     let missing = crate::artifact::missing_in_dir(&dest, "game.models");
@@ -716,6 +738,47 @@ pub async fn download_models(
         "files": report.files,
         "bytes": report.bytes,
     }))
+}
+
+/// 用户**手放**的权重包（浏览器从网盘下下来丢进目录的那种）。
+///
+/// 认的是**内容**：zip 里得有 `GAME-1.0.3-large-onnx/encoder.onnx` —— 不能靠文件名，
+/// 用户把网盘上三个包一起丢进同一个目录是最常见的用法，那时按名字挑会挑中别人的包。
+/// `dirs` 按优先级排：包自己的落点在前，扩展包根在后。
+fn manual_zip(dirs: &[&Path]) -> Option<PathBuf> {
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(d) else {
+            continue;
+        };
+        let mut zips: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip"))
+            })
+            .collect();
+        zips.sort();
+        if let Some(z) = zips
+            .into_iter()
+            .find(|p| crate::svsep::zip_has_entry(p, GAME_ENTRY))
+        {
+            return Some(z);
+        }
+    }
+    None
+}
+
+/// 盘上有没有手放的权重包（界面据此把「下载模型」写成「解压」）。返回文件名。
+pub fn manual_files(writable: &Path) -> Vec<String> {
+    let ctx = crate::artifact::Ctx::new(writable, writable);
+    let dest = crate::artifact::download_dest(
+        &ctx,
+        crate::artifact::get("game.models").expect("表里必须有 game.models"),
+    );
+    manual_zip(&[&dest, &crate::artifact::ext_of(writable)])
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .into_iter()
+        .collect()
 }
 
 /// 删掉本功能下下来的东西（模型 + 动态库）。用于「一键清理依赖」。
@@ -1427,6 +1490,94 @@ mod tests {
         for f in engine::MODEL_FILES {
             std::fs::write(dir.join(f), b"x").unwrap();
         }
+    }
+
+    /** 打一个只含 `GAME-1.0.3-large-onnx/<文件>` 的 zip（内容随便，形状对就行）。 */
+    fn game_zip(path: &Path, entries: &[&str]) {
+        use std::io::Write;
+        let f = std::fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        for e in entries {
+            w.start_file(format!("GAME-1.0.3-large-onnx/{e}"), opts).unwrap();
+            w.write_all(b"not-really-onnx").unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    /// 用户**手放**的权重包（从 123 云盘下下来丢进目录的那种）：直接解，不下。
+    ///
+    /// 这里给的是「必定连不上」的地址 —— 真去下的话拿到的会是网络错，而我们要看到的是
+    /// **解包之后**才会有的那句「缺 …」，它同时证明了两件事：走了手放那条路、而且解开了。
+    #[tokio::test]
+    async fn a_hand_placed_zip_is_unpacked_instead_of_downloaded() {
+        let base = std::env::temp_dir().join("vss-midi-manual");
+        let _ = std::fs::remove_dir_all(&base);
+        let dest = base.join("game").join("models");
+        std::fs::create_dir_all(&dest).unwrap();
+        // 名字故意不标准：认死名字等于逼用户改名
+        game_zip(
+            &dest.join("GAME-1.0.3-large-onnx (1).zip"),
+            &["config.json", "encoder.onnx"],
+        );
+
+        // 界面靠这个把按钮写成「解压」
+        assert_eq!(
+            manual_files(&base),
+            vec!["GAME-1.0.3-large-onnx (1).zip".to_string()],
+            "状态里该报出这套手放的包"
+        );
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = crate::svsep::DownloadCtl::new(&PAUSE, &STOP, false);
+        let err = download_models(&base, &ctl, |_, _, _| {})
+            .await
+            .expect_err("这个假包里没有那三个 onnx，解完必然报「缺」");
+        assert!(
+            err.contains("模型包解开了"),
+            "该是解包之后的错（说明走的是手放那条路）：{err}"
+        );
+        assert!(
+            !dest.join("GAME-1.0.3-large-onnx (1).zip").exists(),
+            "解完该把手放的那个包删掉"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 拿**真的**权重包走一遍手放那条路：`strip` 对不对、落点对不对、校验过不过。
+    ///
+    ///     $env:VSS_REAL_GAME_ZIP='资料归档\GAME-1.0.3-large-onnx.zip'
+    ///     cargo test --lib real_game_zip -- --nocapture
+    #[tokio::test]
+    async fn unpacks_the_real_game_zip_when_asked() {
+        let Ok(zip) = std::env::var("VSS_REAL_GAME_ZIP") else {
+            return;
+        };
+        let base = std::env::temp_dir().join("vss-midi-manual-real");
+        let _ = std::fs::remove_dir_all(&base);
+        let dest = base.join("game").join("models");
+        std::fs::create_dir_all(&dest).unwrap();
+        let name = Path::new(&zip).file_name().unwrap().to_owned();
+        let placed = dest.join(&name);
+        // 复制而不是搬：源包是仓库里的产物，测试不该动它
+        std::fs::copy(&zip, &placed).expect("把真包拷进落点失败");
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = crate::svsep::DownloadCtl::new(&PAUSE, &STOP, false);
+        let t = std::time::Instant::now();
+        let out = download_models(&base, &ctl, |_, _, _| {})
+            .await
+            .expect("真包该能解开");
+        println!(
+            "手放的真包：{} 个文件 / {} 字节，耗时 {:?}",
+            out["files"], out["bytes"], t.elapsed()
+        );
+        let v = status(&base, &base);
+        assert_eq!(v["models"]["ready"], json!(true), "解完该是就绪：{v}");
+        assert!(!placed.exists(), "解完该把手放的那个包删掉");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `models.origin` 三种取值，以及「绿色版两层同路径」这个坑。

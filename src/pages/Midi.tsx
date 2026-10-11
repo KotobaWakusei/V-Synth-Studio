@@ -8,12 +8,13 @@ import {DropHint, useFilePick} from '@/components/FilePick'
 import {Chip, Finding, Panel, PanelHead, ProgressBar, Stat} from '@/components/Panel'
 import {DangerZone, DownloadProgress} from '@/components/Dependency'
 import {JobStatusChip} from '@/components/Job'
+import {ManualPacks} from '@/components/ManualPacks'
 import {Field, TextInput} from '@/components/Field'
 import {DirectoryInput} from '@/components/DirPicker'
 import {baseName, dirName, errText, formatBytes} from '@/lib/format'
 import {askExtDirOnce, ExtDirAsk} from '@/lib/extDir'
 import {useStatusPoll} from '@/lib/polling'
-import {downloadBytes, installLabel, type InstallStep, useInstaller} from '@/lib/useInstaller'
+import {downloadBytes, installLabel, missingSteps, type InstallStep, useInstaller} from '@/lib/useInstaller'
 import {useJob} from '@/lib/useJob'
 import type {PageProps} from './types'
 import './Midi.css'
@@ -312,6 +313,8 @@ export function Midi({onToast, onNavigate}: PageProps) {
                 label: '模型',
                 bytes: downloadBytes(s.models),
                 ready: !!s.models.ready,
+                /* 手放的整套包（网盘那条路）：后端扫目录认出来的，界面只负责改成「解压」 */
+                manual: !!s.models?.manual?.length,
                 start: api.midiDownloadModels,
             },
         ],
@@ -377,6 +380,8 @@ export function Midi({onToast, onNavigate}: PageProps) {
     const dl = st?.download
     /** 那颗大按钮的文案；`null` = 全装好了，那时不画按钮（上面那排 Stat 就是摘要） */
     const installText = installLabel(st ? plan(st) : [])
+    /** 下一步那颗包在盘上已经有手放的整套了 → 按钮是「解压」，图标也跟着换 */
+    const nextIsManual = !!missingSteps(st ? plan(st) : [])[0]?.manual
     /** 进度条标签上「正在装什么」—— 优先用安装循环正在装的那一步，退回下载状态里的种类 */
     const stepName =
         installer.stepLabel || (dl?.kind === 'models' ? '模型' : '')
@@ -753,7 +758,7 @@ export function Midi({onToast, onNavigate}: PageProps) {
                         <div className="btn-row">
                             <Button
                                 variant="primary"
-                                icon="download"
+                                icon={nextIsManual ? 'package' : 'download'}
                                 loading={installer.installing}
                                 disabled={!!dl?.active}
                                 onClick={() => installer.install()}
@@ -761,6 +766,15 @@ export function Midi({onToast, onNavigate}: PageProps) {
                                 {installText}
                             </Button>
                         </div>
+                    )}
+                    {/* 下得慢的那条退路：123 云盘。落点用后端给的当前扩展包根
+                        （用户在设置里改了它跟着变，与音轨分离页显示的是同一个根）。 */}
+                    {installText && (
+                        <ManualPacks
+                            dir={st?.extDir}
+                            what="GAME-1.0.3-large-onnx.zip"
+                            onToast={onToast}
+                        />
                     )}
 
                     {dl && (installer.installing || dl.active) && (

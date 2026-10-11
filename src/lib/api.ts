@@ -729,6 +729,17 @@ interface LyricsDoc {
  *  3. **一次任务几分钟到几十分钟**。提交完只拿 `task`，进度靠轮询 `svsepTask`。
  */
 
+/**
+ * 「扩展包下得慢就自己去网盘下」那个分享链接 —— 音轨分离页与人声转 MIDI 页**共用一份**。
+ *
+ * ⚠️ 这是**国内直连**的那条退路（GitHub release 即便走镜像也可能很慢）。
+ * ⚠️ 用户下下来的是**压缩包**，不用解压：丢到扩展包目录下就行 —— 后端扫目录认出来
+ * （`svsep.rs::manual_sets` / `midi_transcribe.rs::manual_zip`），界面把按钮从「下载」
+ * 换成「解压」，点了直接解盘上那份、一个字节都不下。
+ */
+export const MANUAL_PACKS_URL =
+    'https://1856610041.share.123pan.cn/123pan/xHE8vd-0v0h3?pwd=QM39'
+
 /** 一个模型的落盘状态。⚠️ `size` 与 `expectedSize` 都是**字节**。 */
 export interface SvsepModel {
     /** `uvr` | `roformer` */
@@ -757,6 +768,8 @@ export interface SvsepModels {
     downloadUrl: string
     items: SvsepModel[]
     missingIndex: string[]
+    /** 盘上有没有**用户手放的**整套包 —— 有就把按钮写成「解压」（见 `MANUAL_PACKS_URL`） */
+    manual?: string[]
 }
 
 /** 运行时（Python + torch）的状态。**几 GB，只该下一次**。 */
@@ -773,6 +786,8 @@ export interface SvsepRuntime {
     backend: boolean
     pythonPath: string
     backendPath: string
+    /** 见 `SvsepModels.manual` */
+    manual?: string[]
 }
 
 /**
@@ -788,6 +803,13 @@ export interface SvsepDml {
     dir: string
     /** 压缩包体积（24 MB 上下） */
     zipBytes: number
+    /**
+     * 盘上有没有**用户手放的**加速包（`.whl`）—— 有就把这一步的按钮写成「解压」。
+     *
+     * 这个包是从 PyPI 下的（不是我们的 release），境内也常常很慢，所以网盘那条退路
+     * 对它同样成立。见 `MANUAL_PACKS_URL`。
+     */
+    manual?: string[]
 }
 
 /** 库里的一张壁纸（`wallpaper_scan` 回包里的元素；解析逻辑见 `lib/wallpaper.ts`）。 */
@@ -862,6 +884,11 @@ export interface SvsepStatus {
     dataDir: string
     /** 分离结果落在 `<outputsDir>/<task_id>/<文件名>` */
     outputsDir: string
+    /**
+     * 扩展包根（**当前生效**的那个：设置里改过就是用户选的）。
+     * 界面上「下得慢就自己去网盘下」那行提示显示它 —— 用户改了落点这行跟着变。
+     */
+    extDir?: string
     runtime: SvsepRuntime
     models: SvsepModels
     /** 显卡加速那一块（`installed` / `active` / `nvidia` / `zipBytes`） */
@@ -942,6 +969,8 @@ export interface MidiModels {
     zipBytes: number
     extractBytes: number
     partBytes: number
+    /** 盘上有没有**用户手放的**整套包 —— 有就把按钮写成「解压」（见 `MANUAL_PACKS_URL`） */
+    manual?: string[]
 }
 
 export interface MidiDownload {
@@ -982,6 +1011,8 @@ export interface MidiStatus {
     models: MidiModels
     license: string
     source: string
+    /** 扩展包根（见 `SvsepStatus.extDir` 那条同样的话） */
+    extDir?: string
     download: MidiDownload
     /** 推理方式与显卡现状（与 `midiDevice()` 同源） */
     device: MidiDevice

@@ -229,6 +229,8 @@ pub async fn svsep_status(st: super::St<'_>) -> Cmd {
             "nvidia": crate::svsep::nvidia_present(),
             "dir": crate::platform::clean_path(&crate::svsep::dml_site_dir(&ext)),
             "zipBytes": crate::svsep::DML_BYTES,
+            /* 盘上有没有手放的加速包（`.whl`）—— 有就把这一步的按钮写成「解压」 */
+            "manual": crate::svsep::manual_dml_files(&ext),
         },
         "download": download_state(&ext),
         "running": running,

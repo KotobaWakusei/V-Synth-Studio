@@ -272,6 +272,41 @@ pub fn dml_installed(ext: &Path) -> bool {
         .is_file()
 }
 
+/// 这个 wheel 里那个**认包的条目**（wheel 就是个 zip）。
+const DML_PROBE: &str = "onnxruntime/capi/onnxruntime.dll";
+
+/// 用户**手放**的 DirectML 加速包（`.whl`，从网盘下下来丢进目录的那种）。
+///
+/// 判据与另几个包一致：**看内容**（wheel 里有 [`DML_PROBE`]），不看文件名 ——
+/// 浏览器下载会带 `(1)` 后缀。找两层：扩展包根、以及运行时目录（有人爱往那儿放）。
+fn manual_dml(ext: &Path) -> Option<PathBuf> {
+    for d in [ext.to_path_buf(), runtime_base(ext)] {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        let mut whls: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("whl"))
+            })
+            .collect();
+        whls.sort();
+        if let Some(w) = whls.into_iter().find(|p| zip_has_entry(p, DML_PROBE)) {
+            return Some(w);
+        }
+    }
+    None
+}
+
+/// 盘上有没有手放的加速包（界面据此把这一步的按钮写成「解压」）。
+pub fn manual_dml_files(ext: &Path) -> Vec<String> {
+    manual_dml(ext)
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .into_iter()
+        .collect()
+}
+
 /// 随包 Python 的 `._pth`。**嵌入版 Python 用它固定 `sys.path`，而且会忽略
 /// `PYTHONPATH`** —— 想让 DirectML 那份 ORT 生效只有改这个文件一条路
 /// （实测：设了 `PYTHONPATH` 也照样 import 到 `site-packages` 里那份）。
@@ -515,19 +550,28 @@ pub async fn download_dml(
     let dest = dml_site_dir(ext);
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("建目录失败（{}）：{e}", dest.to_string_lossy()))?;
-    let zip = runtime_base(ext).join("svsep-dml.whl");
+    let tmp = runtime_base(ext).join("svsep-dml.whl");
 
-    fetch_to_file(DML_URL, &zip, Some(DML_BYTES), ctl, &|got, total, stage| {
-        on_progress(got, total, stage)
-    })
-    .await?;
+    /* 手放的加速包优先（网盘那条路）：一个字节都不下 —— 这个包在 PyPI 上，境内也常常很慢。 */
+    let zip = match manual_dml(ext) {
+        Some(w) => w,
+        None => {
+            fetch_to_file(DML_URL, &tmp, Some(DML_BYTES), ctl, &|got, total, stage| {
+                on_progress(got, total, stage)
+            })
+            .await?;
+            tmp
+        }
+    };
 
     // wheel 就是个 zip，根目录里是 `onnxruntime/` 与 `…dist-info/`，整包解到 dml/ 即可
     let report = unpack(&zip, &dest, "", &on_progress)?;
     let _ = std::fs::remove_file(&zip);
     set_dml_active(ext, true)?;
     if !dml_installed(ext) {
-        return Err("包解开了，但没找到 onnxruntime/capi/onnxruntime.dll —— 包结构不对？".into());
+        return Err(format!(
+            "包解开了，但没找到 {DML_PROBE} —— 包结构不对？"
+        ));
     }
     Ok(json!({
         "ok": true,
@@ -590,6 +634,9 @@ pub fn runtime_status(ext: &Path) -> Value {
         "backend": backend.is_file(),
         "pythonPath": py.to_string_lossy(),
         "backendPath": backend.to_string_lossy(),
+        /* 用户手放的包（123 云盘下完直接丢进目录的那种）就是一套完整的包 —— 界面据此
+           把「下载」那颗按钮写成「解压」。空数组 = 没有。 */
+        "manual": manual_files(ext, "runtime"),
     })
 }
 
@@ -651,6 +698,8 @@ pub fn models_status(ext: &Path) -> Value {
               "state": rof_state, "size": rof_size, "expectedSize": ROFORMER_MODEL_FULL },
         ],
         "missingIndex": missing_index,
+        /* 手放的整套包（见 `runtime_status` 那条同样的话） */
+        "manual": manual_files(ext, "models"),
     })
 }
 
@@ -1367,10 +1416,17 @@ struct Bundle<'a> {
     /// 调用方临时顶掉的链接。**只有单文件包能用**：开发机与单测指一个本地
     /// http 服务器（分卷包要顶掉整批，那是 `VSS_MODULES_BASE` 的事）。
     url: Option<&'a str>,
+    /// 扩展包根。用户**手放**的包可能丢在这一层（见 `manual_sets`）
+    ext: PathBuf,
     /// 临时 zip 放哪、解到哪
     dest: PathBuf,
     /// 从条目名里剥掉的一层（见 `extract_zip`）
     strip: &'static str,
+    /// 这个包里**必须有的那个条目**（带壳的完整路径）—— 用来认「这到底是不是这个包」。
+    ///
+    /// ⚠️ 不能靠文件名认：用户把网盘上三个包一起丢进同一个目录是最常见的用法，
+    /// 那时按名字（或按顺序）挑会挑中别人的包 —— 解到错的地方，还把人家删了。
+    probe: &'static str,
 }
 
 impl<'a> Bundle<'a> {
@@ -1379,8 +1435,10 @@ impl<'a> Bundle<'a> {
             label: "模型",
             parts: MODEL_PARTS,
             url,
+            ext: ext.to_path_buf(),
             dest: models_dir(ext),
             strip: "models/",
+            probe: "models/BS-Roformer-SW.ckpt",
         }
     }
 
@@ -1389,8 +1447,10 @@ impl<'a> Bundle<'a> {
             label: "运行时",
             parts: RUNTIME_PARTS,
             url: None,
+            ext: ext.to_path_buf(),
             dest: runtime_base(ext),
             strip: "", // 留着 runtime/ 这一层：那边要的正是 runtime/python.exe
+            probe: "runtime/python.exe",
         }
     }
 
@@ -1399,21 +1459,145 @@ impl<'a> Bundle<'a> {
     /// ⚠️ 本地名字用**资产名**加 `.part`：一来离「release 上那个文件」一眼对得上，
     /// 二来都以 `.part` 收尾 —— `delete_dependencies` 的清扫就是按这个后缀认的
     /// （拼成 `xxx.part1` 会让几 GB 的半个包躲过清扫）。
+    ///
+    /// ⚠️ `url`（调用方临时顶掉的那个）对**单文件包**是完整链接、对**分卷包**是**前缀**
+    /// —— 分卷是一整批，顶不掉其中一个。
     fn files(&self) -> Vec<(String, PathBuf)> {
-        let override_url = self.url.map(str::trim).filter(|u| !u.is_empty());
+        let over = self.url.map(str::trim).filter(|u| !u.is_empty());
         self.parts
             .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let url = match override_url {
-                    // 单文件包的临时顶替。分卷包只可能来自表里（见字段注释）
-                    Some(u) if i == 0 => u.to_string(),
-                    _ => release_url(p.name),
+            .map(|p| {
+                let url = match over {
+                    Some(u) if self.parts.len() == 1 => u.to_string(),
+                    Some(u) => format!("{}/{}", u.trim_end_matches('/'), p.name),
+                    None => release_url(p.name),
                 };
                 (url, self.dest.join(format!("{}.part", p.name)))
             })
             .collect()
     }
+
+    /// 只在单测里用的构造：把发布点顶到某个**前缀**（本地 http 服务器）上。
+    ///
+    /// 为什么不让测试去改进程级环境变量（`VSS_MODULES_BASE`）：那是**全进程**的，而
+    /// 别的测试正好也在解析 URL —— 改了它，`resume_point_reads_the_disk_and_matches_the_url`
+    /// 那种「先写记号、再比对」的测试就会一半概率红（实测 4 跑 2 红）。
+    #[cfg(test)]
+    fn runtime_at(ext: &Path, base: &'a str) -> Self {
+        let mut b = Self::runtime(ext);
+        b.url = Some(base);
+        b
+    }
+
+    /// 用户**手放**的包：从 123 云盘下下来直接丢进目录的那种（界面下载按钮旁边那行提示
+    /// 说的就是它）。返回的是几套**候选**，按优先级排，调用方挑第一套「拼起来真是个
+    /// zip」的用：
+    ///   * **资产名那一套** —— `<dest>/runtime.z01`…（**不带 `.part`**，带 `.part` 的是
+    ///     我们自己下了一半的）；
+    ///   * **任何一个 `*.zip`**（`<dest>` 与 `<ext>` 各扫一层）—— 浏览器下载常带 `(1)`
+    ///     后缀、或者用户随手改了名，只认死名字等于逼用户改名；
+    ///   * 分卷包也认「单独一个大 `runtime.zip`」：123 上那份可能就是一个整包。
+    fn manual_sets(&self) -> Vec<Vec<PathBuf>> {
+        let mut sets = Vec::new();
+        /* 资产名那一套：**落点里、或扩展包根下**都认 —— 用户很可能不管什么子目录，
+           整个丢在根上（界面那行提示写的就是根）。 */
+        for dir in [&self.dest, &self.ext] {
+            let named: Vec<PathBuf> = self.parts.iter().map(|p| dir.join(p.name)).collect();
+            if !named.iter().all(|p| p.is_file()) || sets.contains(&named) {
+                continue;
+            }
+            sets.push(named);
+        }
+        let mut zips = zips_in(&self.dest);
+        if self.ext != self.dest {
+            zips.extend(zips_in(&self.ext));
+        }
+        zips.sort();
+        zips.dedup();
+        sets.extend(zips.into_iter().map(|z| vec![z]));
+        sets
+    }
+
+    /// 这一套文件是不是**这个包**：拼起来读得出中央目录，而且里面确实有这个包的必需条目。
+    ///
+    /// ⚠️ 「是个能读的 zip」不够 —— 用户把三个包一起丢进同一个目录时，`models.zip` 也是个
+    /// 能读的 zip，拿它当运行时解进去就是「解到错地方 + 把人家删了」。
+    fn set_is_pack(&self, set: &[PathBuf]) -> bool {
+        let Ok(v) = Volumes::open(set) else {
+            return false;
+        };
+        let Ok(z) = zip::ZipArchive::new(v) else {
+            return false;
+        };
+        reader_has_entry(z, self.probe)
+    }
+
+    /// 手放的包里第一套**真的能用**的（界面据此把按钮写成「解压」）。
+    fn manual_ready_set(&self) -> Option<Vec<PathBuf>> {
+        self.manual_sets().into_iter().find(|s| self.set_is_pack(s))
+    }
+}
+
+/// 单个 zip 里有没有这个条目 —— 用来认「这是不是那个包」，**不看文件名**。
+pub fn zip_has_entry(p: &Path, want: &str) -> bool {
+    let Ok(f) = std::fs::File::open(p) else {
+        return false;
+    };
+    let Ok(z) = zip::ZipArchive::new(f) else {
+        return false;
+    };
+    reader_has_entry(z, want)
+}
+
+/// 「这个 zip 里有这个条目」—— 分隔符**统一成 `/` 再比**。
+///
+/// ⚠️ 归一化不是洁癖：条目名里 `\` 和 `/` 都真实存在（本仓自己打的 `models.zip` 就是
+/// 反斜杠那种，实测）。按原样比会把**内容完好**的包判成「不是这个包」，界面于是不认它 ——
+/// 用户看到的就是「明明放好了，按钮还是『下载』」。
+/// ⚠️ 先走 `by_name`（快路），不中才逐个归一化比：反斜杠那种一个都中不了，得扫一遍中央目录。
+fn reader_has_entry<R: std::io::Read + std::io::Seek>(
+    mut z: zip::ZipArchive<R>,
+    want: &str,
+) -> bool {
+    if z.by_name(want).is_ok() {
+        return true;
+    }
+    for i in 0..z.len() {
+        let Ok(e) = z.by_index(i) else {
+            continue;
+        };
+        if e.name().replace('\\', "/") == want {
+            return true;
+        }
+    }
+    false
+}
+
+/// 这一层里的 `*.zip`（我们的半个包叫 `xxx.part`，不在其列）。
+fn zips_in(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("zip"))
+        })
+        .collect()
+}
+
+/// 盘上有没有一整套**手放的**包；有就把文件名列出来（界面据此把按钮写成「解压」）。
+pub fn manual_files(ext: &Path, kind: &str) -> Vec<String> {
+    let Some(b) = bundle_of(ext, kind) else {
+        return Vec::new();
+    };
+    b.manual_ready_set()
+        .map(|s| {
+            s.iter()
+                .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 进度回调报的是**哪一段**：还在下，还是已经在解压。
@@ -1518,7 +1702,40 @@ async fn fetch_bundle(
     /* ★ 盘上那些 `.part` 拼得出一整包，就一个字节都别再要 —— 直接去解压。
     ⚠️ 这个判断必须排在「不续传就把旧 `.part` 删掉」**之前**：那条会把一整包也删了。
     记号在不在都不影响这个判断 —— 包是完整的，记号只管续传。 */
-    let whole = pack_is_whole_zip(&paths);
+    let mut whole = pack_is_whole_zip(&paths);
+
+    /* ★★ 用户**手放**的包优先（浏览器从网盘下下来丢进目录的那种）。
+    ⚠️ 认的是**内容**（`set_is_pack` 会看那个必需条目），不是文件名 —— 网盘上三个包一起
+       丢进同一个目录是最常见的用法，按名字挑会挑中别人的包。
+    ⚠️ 「名字对上了、却是跨卷 zip」要当成**有**——报一句能照做的错，比默默再下几个 GB
+       强，也比去读那个只有 111 MB 的末卷、解到一半才炸强。 */
+    let mut bad_multi: Option<usize> = None;
+    let manual = b.manual_sets().into_iter().find(|s| {
+        if b.set_is_pack(s) {
+            return true;
+        }
+        if s.len() > 1 {
+            bad_multi = Some(s.len());
+        }
+        false
+    });
+    if manual.is_none() && !whole {
+        if let Some(n) = bad_multi {
+            return Err(format!(
+                "{}目录里那 {n} 个文件拼起来不是个有效的 zip（像是 WinZip / Bandizip 那种\
+                 「跨卷 zip」—— 各卷不能首尾相接）。删掉它们再用「下载」，或者去 123 云盘\
+                 换成按字节切的那几个文件。",
+                b.label
+            ));
+        }
+    }
+    let src = match &manual {
+        Some(s) => {
+            whole = true;
+            s.clone()
+        }
+        None => paths.clone(),
+    };
 
     if !whole && !ctl.resume {
         /* ⚠️ **调用方没授权续传就把旧的 `.part` 全删掉。**
@@ -1629,11 +1846,12 @@ async fn fetch_bundle(
     /* 下面这一段是**解压**、不是下载。`unpack_volumes` 负责把阶段切成 `Extract`
        （界面据此把标签从「正在下载…」改成「正在解压…」），别在调用点各写一遍
        那两行样板，见 `unpack` 的注释。 */
-    match unpack_volumes(&paths, &b.dest, b.strip, on_progress) {
+    match unpack_volumes(&src, &b.dest, b.strip, on_progress) {
         Ok(report) => {
-            // 解好了才删：它们有几 GB，留着没用（`.part` 这名字也保证下次不会被当成
-            // .zip 用）。记号跟着走 —— 没有「半个包」可续了。
-            for (_, p) in &files {
+            /* 解好了才删：它们有几 GB，留着没用。手放的那份也一起删 —— 已经装进
+               `dest` 了，再压着一个 4.9 GB 的包只是占地方。两条路取并集删，不存在
+               的文件删一下是无害的。 */
+            for p in src.iter().chain(paths.iter()) {
                 let _ = std::fs::remove_file(p);
                 let _ = std::fs::remove_file(url_marker(p));
             }
@@ -3224,8 +3442,9 @@ mod tests {
 
         let dest = std::env::temp_dir().join("vss-svsep-parallel-vols");
         let _ = std::fs::remove_dir_all(&dest);
-        // SAFETY: 这一条测试自己负责把变量改回来；同时问它的只有 release_base()
-        unsafe { std::env::set_var("VSS_MODULES_BASE", format!("http://127.0.0.1:{port}")) };
+        let base = format!("http://127.0.0.1:{port}");
+        // 顶替发布点**只改这个 Bundle**（见 `runtime_at`）：进程级环境变量会和别的测试抢
+        let b = Bundle::runtime_at(&dest, &base);
 
         static PAUSE: AtomicBool = AtomicBool::new(false);
         static STOP: AtomicBool = AtomicBool::new(false);
@@ -3234,7 +3453,7 @@ mod tests {
            —— 只留最后一个 `total` 会拿到解压那个数，看着像「分母错了」。 */
         let seen = std::sync::Arc::new(Mutex::new((0u64, 0u64, 0usize, 0usize)));
         let seen2 = seen.clone();
-        let out = download_runtime(&dest, &ctl, move |got, total, stage| {
+        let out = fetch_bundle(&b, &ctl, &move |got, total, stage| {
             let mut s = seen2.lock().unwrap();
             if stage == Stage::Extract {
                 s.3 += 1;
@@ -3248,7 +3467,6 @@ mod tests {
         })
         .await
         .expect("六卷并发下载失败");
-        unsafe { std::env::remove_var("VSS_MODULES_BASE") };
 
         assert!(matches!(out, FetchOutcome::Done(_)), "没下完：{out:?}");
         assert!(runtime_ready(&dest), "六卷下完解完却不算就绪");
@@ -3370,6 +3588,324 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 用户**手放**的包：一个字节都不下，直接解。
+    ///
+    /// 为什么值得钉死：这条路上「认哪个文件」全靠扫目录，认错了的表现是「明明放好了还去
+    /// 下 485 MB」（烧的是用户的流量），或者反过来「把 `.part` 当手放的包解了」。
+    #[tokio::test]
+    async fn a_hand_placed_models_zip_is_extracted_without_downloading() {
+        let inner = "BS-Roformer-SW".repeat(400);
+        let zip = make_zip(&[
+            ("models/a.onnx", inner.as_bytes(), true),
+            ("models/b.ckpt", &[7u8; 3000], false),
+            // 认包用的那个条目（`Bundle::probe`）—— 没有它就当不成「这个包」
+            ("models/BS-Roformer-SW.ckpt", b"probe", true),
+        ]);
+        let dest = std::env::temp_dir().join("vss-svsep-manual-models");
+        let _ = std::fs::remove_dir_all(&dest);
+        let models = models_dir(&dest);
+        std::fs::create_dir_all(&models).unwrap();
+        // 名字故意不标准（浏览器下载常带 `(1)`），内容是真的 zip
+        std::fs::write(models.join("models (1).zip"), &zip).unwrap();
+
+        // 界面靠这个把按钮写成「解压」
+        let st = models_status(&dest);
+        assert_eq!(
+            st["manual"],
+            json!(["models (1).zip"]),
+            "状态里该报出这套手放的包：{st}"
+        );
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        /* 链接指向一个**必定连不上**的地址：真去下就必然失败 —— 这条测试能过，
+           就说明它压根没联网。 */
+        let out = download_models(&dest, "http://127.0.0.1:9/x.zip", &ctl, |_, _, _| {})
+            .await
+            .expect("手放的包该直接解开");
+        assert!(matches!(out, FetchOutcome::Done(_)), "没收场：{out:?}");
+        assert_eq!(
+            std::fs::read(models.join("a.onnx")).unwrap(),
+            inner.as_bytes(),
+            "解出来的内容不对"
+        );
+        assert!(
+            !models.join("models (1).zip").exists(),
+            "解完该把手放的那个包删掉（不然一直压着几百 MB）"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 手放的**分卷**同理：六卷按名字摆在落点里，直接拼起来解，不联网。
+    #[tokio::test]
+    async fn a_hand_placed_split_runtime_is_extracted_without_downloading() {
+        let zip = make_zip(&[
+            ("runtime/python.exe", b"python-exe", true),
+            ("backend/app.py", b"print(1)", true),
+            ("bin/ffmpeg.exe", b"ffmpeg-exe", true),
+            ("runtime/Lib/x.dll", &[7u8; 5000], false),
+        ]);
+        let dest = std::env::temp_dir().join("vss-svsep-manual-runtime");
+        let _ = std::fs::remove_dir_all(&dest);
+        let svsep = runtime_base(&dest);
+        std::fs::create_dir_all(&svsep).unwrap();
+        let chunk = zip.len().div_ceil(RUNTIME_PARTS.len());
+        for (i, p) in RUNTIME_PARTS.iter().enumerate() {
+            let from = (i * chunk).min(zip.len());
+            let to = ((i + 1) * chunk).min(zip.len());
+            std::fs::write(svsep.join(p.name), &zip[from..to]).unwrap();
+        }
+        assert_eq!(
+            manual_files(&dest, "runtime").len(),
+            RUNTIME_PARTS.len(),
+            "状态里该报出这六卷"
+        );
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        let out = download_runtime(&dest, &ctl, |_, _, _| {})
+            .await
+            .expect("手放的分卷该直接拼起来解开");
+        assert!(matches!(out, FetchOutcome::Done(_)), "没收场：{out:?}");
+        assert!(runtime_ready(&dest), "解完却不就绪");
+        for p in RUNTIME_PARTS {
+            assert!(
+                !svsep.join(p.name).exists(),
+                "解完该删掉手放的 {}",
+                p.name
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 条目名用**反斜杠**的包：照样要认出来，也要解得对。
+    ///
+    /// 这不是构造出来的怪例 —— 本仓自己打的 `models.zip` 就是反斜杠条目（实测），
+    /// 而第一版的「按内容认包」只比 `/`，于是用户从网盘下回来那份**内容完好**却认不出来，
+    /// 界面一直显示「下载」。解压那条路（`extract_zip`）本来就归一化了，漏的是「认包」这一步。
+    #[tokio::test]
+    async fn a_hand_placed_pack_with_backslash_entries_is_recognised() {
+        let zip = make_zip(&[
+            (r"models\BS-Roformer-SW.ckpt", b"probe", true),
+            (r"models\UVR-MDX-NET-Inst_HQ_3.onnx", &[3u8; 900], false),
+        ]);
+        let dest = std::env::temp_dir().join("vss-svsep-manual-backslash");
+        let _ = std::fs::remove_dir_all(&dest);
+        let models = models_dir(&dest);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("models.zip"), &zip).unwrap();
+
+        assert_eq!(
+            manual_files(&dest, "models"),
+            vec!["models.zip".to_string()],
+            "反斜杠条目也要认出来"
+        );
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        let out = download_models(&dest, "http://127.0.0.1:9/x.zip", &ctl, |_, _, _| {})
+            .await
+            .expect("反斜杠条目该能解开");
+        assert!(matches!(out, FetchOutcome::Done(_)), "没收场：{out:?}");
+        assert!(
+            models.join("BS-Roformer-SW.ckpt").is_file(),
+            "反斜杠条目没解成正常路径"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// **同一个目录里躺着别人的包**（网盘上三个包一起下、一起丢进根目录，这是最常见的
+    /// 用法）：必须按**内容**认出自己的那个，不能按文件名/顺序挑。
+    ///
+    /// 认错的下场不是「报个错」：会拿 `models.zip` 当运行时解进 `svsep/`，然后把
+    /// **用户的 `models.zip` 删掉** —— 修都修不回来。
+    #[tokio::test]
+    async fn another_pack_in_the_same_folder_is_not_mistaken_for_this_one() {
+        let dest = std::env::temp_dir().join("vss-svsep-manual-mixed");
+        let _ = std::fs::remove_dir_all(&dest);
+        let svsep = runtime_base(&dest);
+        std::fs::create_dir_all(&svsep).unwrap();
+
+        /* ① 单文件包的整包（123 上那份没有分卷，就是一个大 zip）丢在**扩展包根**上：
+           要能被认出来。名字故意取得不标准。 */
+        let runtime_zip = make_zip(&[
+            ("runtime/python.exe", b"python-exe", true),
+            ("backend/app.py", b"print(1)", true),
+            ("bin/ffmpeg.exe", b"ffmpeg-exe", true),
+        ]);
+        std::fs::write(dest.join("runtime 整包.zip"), &runtime_zip).unwrap();
+        /* ② 旁边再放一个**别人的**包：它也是个能读的 zip，而且名字排更前
+           （`GAME…` < `runtime…`）—— 按名字挑就会挑中它。 */
+        let other = make_zip(&[("GAME-1.0.3-large-onnx/encoder.onnx", b"x", true)]);
+        std::fs::write(dest.join("GAME-1.0.3-large-onnx.zip"), &other).unwrap();
+        // ③ 模型那一层也不能被别人的包骗到
+        let models = models_dir(&dest);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::write(models.join("GAME-1.0.3-large-onnx.zip"), &other).unwrap();
+
+        assert_eq!(
+            manual_files(&dest, "runtime"),
+            vec!["runtime 整包.zip".to_string()],
+            "运行时该认出整包那份，而不是旁边的 GAME 包"
+        );
+        assert!(
+            manual_files(&dest, "models").is_empty(),
+            "模型那一层里只有别人的包 ⇒ 不该说「盘上有」"
+        );
+
+        // 真解一遍：解出来的必须是运行时那一棵，而且**只删自己那份**
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        let out = download_runtime(&dest, &ctl, |_, _, _| {})
+            .await
+            .expect("整包该直接解开");
+        assert!(matches!(out, FetchOutcome::Done(_)), "没收场：{out:?}");
+        assert!(runtime_ready(&dest), "解完却不就绪");
+        assert!(
+            !dest.join("runtime 整包.zip").exists(),
+            "解完该删掉自己那份"
+        );
+        assert!(
+            dest.join("GAME-1.0.3-large-onnx.zip").is_file(),
+            "别人的包一个字节都不许动"
+        );
+        assert!(models.join("GAME-1.0.3-large-onnx.zip").is_file());
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 名字对上了、却**拼不成 zip**（跨卷 zip 就是这个下场）：报一句能照做的错，
+    /// 而不是默默再下 4.9 GB，也不是去读那个只有一百多 MB 的末卷、解到一半才炸。
+    #[tokio::test]
+    async fn a_hand_placed_set_that_is_not_a_byte_split_is_reported() {
+        let dest = std::env::temp_dir().join("vss-svsep-manual-broken");
+        let _ = std::fs::remove_dir_all(&dest);
+        let svsep = runtime_base(&dest);
+        std::fs::create_dir_all(&svsep).unwrap();
+        for (i, p) in RUNTIME_PARTS.iter().enumerate() {
+            std::fs::write(svsep.join(p.name), vec![i as u8 + 1; 4096]).unwrap();
+        }
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        let err = download_runtime(&dest, &ctl, |_, _, _| {})
+            .await
+            .expect_err("拼不起来的整套该报错");
+        assert!(err.contains("不是个有效的 zip"), "错误要说得清：{err}");
+        assert!(
+            svsep.join("runtime.z01").is_file(),
+            "报错时不该动用户自己放的文件"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 拿**真的整包**（网盘上那份没有分卷，就是一个 4.94 GB 的 zip）验一遍「手放」的识别。
+    ///
+    /// 为什么值得单跑：123 云盘那份是**整包**，而 release 上那份是**六卷** —— 两条路的
+    /// 识别逻辑不同（一个按内容读 zip、一个按顺序拼六卷）。这里用硬链接把真包挂进落点，
+    /// 不占额外空间、也不动源文件。
+    ///
+    ///     $env:VSS_REAL_RUNTIME_ZIP='C:\Users\qingm\Downloads\runtime.zip'
+    ///     cargo test --lib real_hand_placed_runtime -- --nocapture
+    #[test]
+    fn reads_the_real_hand_placed_runtime_when_asked() {
+        let Ok(zip) = std::env::var("VSS_REAL_RUNTIME_ZIP") else {
+            return;
+        };
+        let dest = std::env::temp_dir().join("vss-svsep-manual-real-runtime");
+        let _ = std::fs::remove_dir_all(&dest);
+        let svsep = runtime_base(&dest);
+        std::fs::create_dir_all(&svsep).unwrap();
+        let name = Path::new(&zip).file_name().unwrap().to_owned();
+        std::fs::hard_link(&zip, svsep.join(&name)).expect("硬链接真包失败（源在别的盘上？）");
+
+        let got = manual_files(&dest, "runtime");
+        println!("手放的真整包：{got:?}");
+        assert_eq!(got, vec![name.to_string_lossy().to_string()], "该认出这个整包");
+        // 同一套判据下，模型那一层不该认它
+        let models = models_dir(&dest);
+        std::fs::create_dir_all(&models).unwrap();
+        std::fs::hard_link(&zip, models.join(&name)).unwrap();
+        assert!(
+            manual_files(&dest, "models").is_empty(),
+            "拿运行时整包当模型包（或反过来）会把两个落点都毁掉"
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// 手放的**显卡加速包**（A 卡 / 核显那个 `.whl`，从网盘下下来丢进目录的那种）：
+    /// 认得出、也不联网就装上。
+    ///
+    /// ⚠️ 它和另几个包不同：**从 PyPI 下来**，境内也常常很慢 —— 所以「下得慢去网盘」
+    /// 这条退路对它同样成立。
+    #[tokio::test]
+    async fn a_hand_placed_dml_wheel_is_installed_without_downloading() {
+        let ext = std::env::temp_dir().join("vss-svsep-manual-dml");
+        let _ = std::fs::remove_dir_all(&ext);
+        // `set_dml_active` 要改随包 Python 的 `._pth`，所以它得在
+        let rt = runtime_base(&ext).join("runtime");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(rt.join("python310._pth"), "python310.zip\n.\n").unwrap();
+
+        // wheel 就是个 zip：认包看里面有没有那个 dll
+        let whl = make_zip(&[
+            ("onnxruntime/capi/onnxruntime.dll", b"dml-dll", true),
+            ("onnxruntime_directml-1.23.0.dist-info/METADATA", b"x", false),
+        ]);
+        // 名字故意带 `(1)`（浏览器下载的常见形状）
+        let name = "onnxruntime_directml-1.23.0-cp310-cp310-win_amd64 (1).whl";
+        std::fs::write(ext.join(name), &whl).unwrap();
+        assert_eq!(
+            manual_dml_files(&ext),
+            vec![name.to_string()],
+            "手放的 whl 该被认出来"
+        );
+        // 它不该被当成别的包（互相之间也不能认错）
+        assert!(manual_files(&ext, "runtime").is_empty());
+        assert!(manual_files(&ext, "models").is_empty());
+
+        static PAUSE: AtomicBool = AtomicBool::new(false);
+        static STOP: AtomicBool = AtomicBool::new(false);
+        let ctl = DownloadCtl::new(&PAUSE, &STOP, false);
+        // 网络一断就该失败：这里能过就说明没联网
+        download_dml(&ext, &ctl, |_, _, _| {})
+            .await
+            .expect("手放的 whl 该直接装上");
+        assert!(dml_installed(&ext), "装上之后该认得出这个 dll");
+        assert!(dml_active(&ext), "装上之后 `._pth` 那一行该生效");
+        assert!(!ext.join(name).exists(), "装完该把手放的那个 whl 删掉");
+
+        let _ = std::fs::remove_dir_all(&ext);
+    }
+
+    /// 拿**用户机器上真实那几个包**验一遍「认包」（三个都在扩展包根上：整包 runtime、
+    /// 模型、人声转 MIDI 的权重）。
+    ///
+    ///     $env:VSS_REAL_EXT_DIR="$env:APPDATA\com.qingmu.vocalworkstation"
+    ///     cargo test --lib real_ext_dir -- --nocapture
+    ///
+    /// ⚠️ 它只看「认不认」，不解（那要几分钟、还会把用户装好的东西换掉）。
+    #[test]
+    fn recognises_the_real_hand_placed_packs_when_asked() {
+        let Ok(ext) = std::env::var("VSS_REAL_EXT_DIR") else {
+            return;
+        };
+        let ext = PathBuf::from(ext);
+        let runtime = manual_files(&ext, "runtime");
+        let models = manual_files(&ext, "models");
+        let game = crate::midi_transcribe::manual_files(&ext);
+        println!("runtime: {runtime:?}");
+        println!("models : {models:?}");
+        println!("game   : {game:?}");
+        assert!(!runtime.is_empty(), "整包 runtime 没被认出来");
+        assert!(!models.is_empty(), "models.zip 没被认出来");
+        assert!(!game.is_empty(), "GAME 权重包没被认出来");
     }
 
     /// 把**真的** runtime 包整个解一遍（4.9 GB / 两万多个条目）。

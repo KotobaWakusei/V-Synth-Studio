@@ -47,6 +47,13 @@ export interface InstallStep {
      * 「继续安装」，而用户明明还没开始装。
      */
     skip?: boolean
+    /**
+     * 盘上已经有**用户手放的**整套包了（从网盘下下来丢进目录的那种）。
+     *
+     * 有这个标记时这一步点了**不联网**：后端直接解盘上那份（见 `svsep.rs::manual_sets`）。
+     * 按钮文案因此要写成「解压」而不是「下载」—— 说「下载」会让用户以为又在下。
+     */
+    manual?: boolean
 }
 
 /** 后端 `download` 那一块（两个页面同形） */
@@ -93,11 +100,18 @@ export function missingSteps(steps: InstallStep[]): InstallStep[] {
 /**
  * 那颗大按钮的文案。`null` = **一个都不缺，别画按钮**（页面那时显示状态摘要）。
  *
- * 一个都没装 → 「安装扩展包（约 X）」；装了一部分 → 「继续安装（还差 约 X）」。
+ * 一个都没装 → 「安装扩展包（约 X）」；装了一部分 → 「继续安装（还差 约 X）」；
+ * **下一步那颗包已经在盘上了**（用户从网盘下好放进去的）→ 「解压」。
  */
 export function installLabel(steps: InstallStep[]): string | null {
     const missing = missingSteps(steps)
     if (missing.length === 0) return null
+    /* ⚠️ 只看**下一步**那一个：循环是按顺序装的，第一个缺的就是这一次要干的活。
+       说「解压」也不算谎 —— 那一步确实一个字节都不下（后端会走手放包那条路）。 */
+    if (missing[0].manual) {
+        const size = missing[0].bytes > 0 ? `（${formatBytes(missing[0].bytes)}，已在盘上）` : ''
+        return `解压${missing[0].label}${size}`
+    }
     const bytes = missing.reduce((n, s) => n + (s.bytes || 0), 0)
     const size = bytes > 0 ? formatBytes(bytes) : ''
     const started = steps.some((s) => !s.skip && s.ready)

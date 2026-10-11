@@ -6,12 +6,13 @@ import {Icon} from '@/components/Icon'
 import {Chip, Finding, Panel, PanelHead, ProgressBar, Stat} from '@/components/Panel'
 import {DangerZone, DownloadProgress} from '@/components/Dependency'
 import {JobStatusChip, svsepTaskStatus} from '@/components/Job'
+import {ManualPacks} from '@/components/ManualPacks'
 import {GlassSegmentedControl} from '@ttqtt/liquid-glass-react'
 import {DropHint, useFilePick} from '@/components/FilePick'
 import {askExtDirOnce, ExtDirAsk} from '@/lib/extDir'
 import {baseName, errText, formatBytes} from '@/lib/format'
 import {POLL_STATUS, useStatusPoll} from '@/lib/polling'
-import {downloadBytes, extractedBytes, installLabel, type InstallStep, useInstaller,} from '@/lib/useInstaller'
+import {downloadBytes, extractedBytes, installLabel, missingSteps, type InstallStep, useInstaller,} from '@/lib/useInstaller'
 import {capOk} from '@/lib/types'
 import type {PageProps} from './types'
 import './Svsep.css'
@@ -239,6 +240,8 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                     label: '运行时',
                     bytes: downloadBytes(s.runtime),
                     ready: !!s.runtimeReady && !leftover('runtime'),
+                    /* 手放的整套包（网盘那条路）—— 后端扫目录认出来的，界面只负责改文案 */
+                    manual: !!s.runtime?.manual?.length,
                     start: api.svsepDownloadRuntime,
                 },
                 {
@@ -246,6 +249,7 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                     label: '模型',
                     bytes: downloadBytes(s.models),
                     ready: svsepModelsOk(s) && !leftover('models'),
+                    manual: !!s.models?.manual?.length,
                     start: api.svsepDownloadModels,
                 },
                 {
@@ -257,6 +261,9 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                        给 N 卡机器装它反而更慢。标成 `skip` 而不是 `ready` —— 否则按钮会
                        把这一台机器说成「已经装过一部分」。 */
                     skip: !!s.dml?.nvidia,
+                    /* A 卡 / 核显：盘上有手放的 `.whl` 就是「解压」（它从 PyPI 下来，
+                       境内也常慢，所以网盘那条退路对它同样成立） */
+                    manual: !!s.dml?.manual?.length,
                     start: api.svsepDmlDownload,
                 },
             ]
@@ -404,6 +411,8 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
     const steps = useMemo(() => (st ? plan(st) : []), [st, plan])
     /** 那颗大按钮的文案；`null` = 全装好了，那时不画按钮（上面那排 Stat 就是摘要） */
     const installText = installLabel(steps)
+    /** 下一步那颗包在盘上已经有手放的整套了 → 按钮是「解压」，图标也跟着换 */
+    const nextIsManual = !!missingSteps(steps)[0]?.manual
     /** 删依赖之后要重新下多少 —— 与安装按钮同一个来源 */
     const allBytes = steps.reduce((n, s) => n + (s.bytes || 0), 0)
 
@@ -795,7 +804,7 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                         <div className="btn-row">
                             <Button
                                 variant="primary"
-                                icon="download"
+                                icon={nextIsManual ? 'package' : 'download'}
                                 loading={installer.installing}
                                 disabled={!!dl?.active || !!dl?.delete?.active}
                                 onClick={() => installer.install()}
@@ -803,6 +812,15 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                                 {installText}
                             </Button>
                         </div>
+                    )}
+                    {/* 下得慢的那条退路：123 云盘。**只在还没装齐时才提** —— 装好了还劝人去
+                        下载就成了噪音。落点用后端给的当前扩展包根（设置里改了它跟着变）。 */}
+                    {localOk && installText && (
+                        <ManualPacks
+                            dir={st?.extDir}
+                            what="网盘上那几个包（运行时整包或分卷、models.zip、A 卡 / 核显的显卡加速包 .whl）"
+                            onToast={onToast}
+                        />
                     )}
 
                     {/* 推理方式（自动 / GPU / CPU）：原版软件在标题栏上就有这个三选一。
