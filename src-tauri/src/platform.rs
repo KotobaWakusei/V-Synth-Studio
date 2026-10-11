@@ -28,6 +28,47 @@ pub fn node_platform_name() -> &'static str {
     }
 }
 
+/* ══════════════════════════════ 安装时选的语言 ══════════════════════════════ */
+
+/// 安装界面的语言 → 程序界面的语言。
+///
+/// 安装器写的是 NSIS 那三种（`zh-CN` / `ja-JP` / 其余一律 `en-US`），程序认的是同一套
+/// 标识，所以这里只做**归一化**：`zh` / `zh-Hans` / `ja` 这类简写也认，认不出的回
+/// `None` —— **不猜**一个语言出来（猜错等于把用户的语言设置改掉）。
+fn normalize_lang(raw: &str) -> Option<&'static str> {
+    let v = raw.trim().to_ascii_lowercase();
+    if v.starts_with("zh") {
+        Some("zh-CN")
+    } else if v.starts_with("ja") {
+        Some("ja-JP")
+    } else if v.starts_with("en") {
+        Some("en-US")
+    } else {
+        None
+    }
+}
+
+/// 安装时选的语言（`zh-CN` / `en-US` / `ja-JP`），读不到回 `None`。
+///
+/// 读的是安装器写下的注册表值：`HKCU\Software\qingmu\<产品名>` 的
+/// `InstallerLanguage`（写它的是 `src-tauri/nsis-hooks.nsh`）。绿色版没有这一条，
+/// 自然回 `None` —— 程序就用配置里那份。
+///
+/// ⚠️ 键路径分两段：`Software\qingmu` 来自打包配置里的 `publisher`，改发布者时
+/// 这里与 `nsis-hooks.nsh` 要一起改（产品名从 `tauri.conf.json` 的 `productName` 来）。
+pub fn installer_language(product: &str) -> Option<&'static str> {
+    #[cfg(windows)]
+    {
+        let key = format!(r"Software\qingmu\{product}");
+        crate::reg::read_hkcu_string(&key, "InstallerLanguage").and_then(|v| normalize_lang(&v))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = product;
+        None
+    }
+}
+
 /* ══════════════════════════════════ 路径规范化 ══════════════════════════════════ */
 
 /// 把路径转成可以直接显示、写进 JSON 的字符串。

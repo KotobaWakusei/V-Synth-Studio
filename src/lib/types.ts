@@ -51,6 +51,14 @@ export interface AppState {
     transformOps: unknown[]
     audioFormats: Record<string, unknown>
     config: Record<string, unknown>
+    /**
+     * **安装时选的**界面语言（`zh-CN` / `en-US` / `ja-JP`），读不到是缺失。
+     *
+     * ⚠️ 与 `config.language` 是两件事：这一个是「安装器希望我用哪个语言」，
+     * 由 `App.tsx` 在**第一次**拿到状态时应用一次（写进配置，之后就以配置为准）；
+     * 绿色版没有这一项。
+     */
+    installerLanguage?: string
     paths: { root?: string; outputDir?: string; downloadDir?: string; toolsDir?: string }
     pinyin: Record<string, unknown>
     /** `win32` / `darwin` 这种（Node 命名，跨平台代码沿用了） */

@@ -60,6 +60,11 @@ pub struct AppState {
     pub writable: PathBuf,
     /// 是否安装版 —— 界面上给恢复提示时用得上
     pub installed: bool,
+    /// 安装时选的界面语言（`zh-CN` / `en-US` / `ja-JP`），读不到是 `None`。
+    ///
+    /// ⚠️ 只在**启动时读一次**（见 `new`）：它来自注册表里安装器写下的那一条，
+    /// 运行期不会变，而每次 `get_state` 都去开一次注册表纯属浪费。
+    pub installer_lang: Option<&'static str>,
     /// 配置
     pub config: Mutex<Value>,
     /// **上一个**扩展包目录（`extDir` 被改之前的那个）。
@@ -159,6 +164,9 @@ impl AppState {
             root: paths.root,
             writable: paths.writable,
             installed: paths.installed,
+            /* 安装时选的语言：读一次就够（见字段注释）。产品名与打包配置里的
+               `productName` 一致，也就是安装器写注册表时用的那个键名。 */
+            installer_lang: crate::platform::installer_language("v-synth-studio"),
             config: Mutex::new(config),
             previous_ext_dir,
             jobs: Mutex::new(JobTable::default()),
@@ -234,6 +242,10 @@ pub async fn get_state(st: super::St<'_>) -> Cmd {
         "pinyin": crate::data::pinyin_summary(&st.root),
         // Cookie 打码后再给前端：这一份会进前端全局状态
         "config": super::config_file::mask_secrets(&cfg),
+        /* 安装时选的界面语言。**与 `config.language` 分开**：这一个是「安装器想让我用
+           哪个语言」，只在第一次启动时由前端应用一次；配置里那个是用户的最终选择，
+           之后用户在「设置」里改过就以配置为准（见 `App.tsx`）。 */
+        "installerLanguage": st.installer_lang,
         "paths": {
             "root": st.root.to_string_lossy(),
             "outputDir": cfg.get("outputDir").cloned().unwrap_or(json!("")),
