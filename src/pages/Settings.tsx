@@ -653,12 +653,15 @@ const LICENSES: { feature: string; upstream: string; href?: string; license: str
 ]
 
 /**
- * 赞助那一栏：一段话 + 一张赞赏码。
+ * 赞助那一栏：一段话 + 两张收款码（微信 / 支付宝各一张）。
  *
- * 图片在 `public/img/sponsor.jpg`，由 Vite 原样拷进 `dist/`（`public/` 下的东西
- * 不走打包，路径就是 `/img/sponsor.jpg`）。
+ * 图片在 `public/img/sponsor*.jpg`，由 Vite 原样拷进 `dist/`（`public/` 下的东西
+ * 不走打包，路径就是 `/img/…`）。
  *
- * ⚠️ **二维码必须保持白底**：它是给手机摄像头扫的，跟着暗色主题走会扫不出来 ——
+ * ⚠️ **两张码不能合并成一张**：微信只认微信的码、支付宝只认支付宝的（支付宝那张
+ * 图上还写着「推荐使用支付宝」），所以两张并排摆、各自带标题，用户扫之前看得出扫的是哪张。
+ *
+ * ⚠️ **码必须保持原本的白底**：它们是给手机摄像头扫的，跟着暗色主题走会扫不出来 ——
  * 和 B 站扫码登录那块 `.qr-box` 同一条规矩（样式在 `Settings.css` 的 `.sponsor-code`）。
  *
  * 文案是作者的话，**不翻译**：与「关于作者」里那几段同一条规矩 —— 第一人称说给
@@ -673,14 +676,25 @@ function Sponsor() {
                     软件的开发与运营几乎得靠你们赞助了。作者只是个学生，拿不出太多钱为爱发电，抱歉。
                     有能力的希望可以赞助一下，记得备注 ID，会同步到感谢名单，谢谢！
                 </p>
-                <img
-                    className="sponsor-code"
-                    src="/img/sponsor.jpg"
-                    alt="赞赏码"
-                    width={244}
-                    height={244}
-                />
-                <p className="hint">右键（或长按）保存图片，用微信 / 支付宝扫一扫。</p>
+                {/* 左边是微信（`sponsor.jpg` 那张写着「赞赏码」），右边是支付宝。
+                    两张图的宽高比差很多（正方形 vs 竖长条），所以只约束宽度、让高度各自走 */}
+                <div className="sponsor-codes">
+                    <figure className="sponsor-card">
+                        <img className="sponsor-code" src="/img/sponsor.jpg" alt="微信赞赏码"/>
+                        <figcaption className="sponsor-caption">微信</figcaption>
+                    </figure>
+                    <figure className="sponsor-card">
+                        <img
+                            className="sponsor-code sponsor-code-alipay"
+                            src="/img/sponsor-alipay.jpg"
+                            alt="支付宝赞赏码"
+                        />
+                        <figcaption className="sponsor-caption">支付宝</figcaption>
+                    </figure>
+                </div>
+                <p className="sponsor-hint">
+                    右键（或长按）保存图片，用对应的应用扫一扫。
+                </p>
             </div>
         </Panel>
     )
