@@ -697,14 +697,26 @@ async fn download_bilibili(
                     match net::fetch_bytes(url, net::headers(&[]), 20).await {
                         Ok(bytes) => {
                             let text = String::from_utf8_lossy(&bytes).to_string();
-                            let dest = joined(target_dir, &format!("{safe}.{lan}.srt"));
-                            let _ = std::fs::write(&dest, bcc_to_srt(&text));
-                            written.push(dest.clone());
-                            super::jobs::log_job(
-                                st,
-                                job,
-                                &format!("已保存字幕：{}（{lan_doc}）", basename(&dest)),
-                            );
+                            // `lan` 来自 B 站接口、没过任何清洗，带 `/` 或 `..` 时
+                            // 目标就落到输出目录外面去了
+                            let tag = if lan.is_empty() {
+                                "unknown".to_string()
+                            } else {
+                                safe_title(lan)
+                            };
+                            let dest = joined(target_dir, &format!("{safe}.{tag}.srt"));
+                            // 写失败不能当成功报：`files` 里推一个不存在的路径，
+                            // 用户按提示去找是找不到的（同函数的弹幕分支就分了 Err）
+                            if let Err(e) = std::fs::write(&dest, bcc_to_srt(&text)) {
+                                super::jobs::log_job(st, job, &format!("⚠ 字幕保存失败：{e}"));
+                            } else {
+                                written.push(dest.clone());
+                                super::jobs::log_job(
+                                    st,
+                                    job,
+                                    &format!("已保存字幕：{}（{lan_doc}）", basename(&dest)),
+                                );
+                            }
                         }
                         Err(e) => super::jobs::log_job(st, job, &format!("⚠ 字幕下载失败：{e}")),
                     }
