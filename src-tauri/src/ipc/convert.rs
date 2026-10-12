@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use serde_json::{Value, json};
 
 use super::Cmd;
-use super::jobs::{finish_job, log_job, new_job, set_job};
+use super::jobs::{finish_job, is_canceled, log_job, new_job, set_job};
 
 /* ══════════════════════════════════ 收集工程文件 ══════════════════════════════════ */
 
@@ -348,6 +348,16 @@ pub async fn convert_run(st: super::St<'_>, args: Value) -> Cmd {
         let mut fail_count = 0usize;
 
         for (i, input) in inputs.iter().enumerate() {
+            /* ⚠️ 取消只改了任务状态（`set_job` 对终态不覆盖），循环必须自己来问。
+            不问的话界面上显示「已取消」、后台却把剩下几十个工程照常转完并写盘。 */
+            if is_canceled(&st2, &job_id2) {
+                log_job(
+                    &st2,
+                    &job_id2,
+                    &format!("已取消，剩余 {} 个文件不再处理", total - i),
+                );
+                return;
+            }
             let base = ((i as f64 / total as f64) * 100.0) as u32;
             let file_name = Path::new(input)
                 .file_name()
