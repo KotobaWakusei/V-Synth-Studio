@@ -1037,12 +1037,16 @@ pub fn bcc_to_srt(json_text: &str) -> String {
 }
 
 /// 秒 → `HH:MM:SS,mmm`（SRT 的时间格式，**逗号**不是点）。
+///
+/// ⚠️ 先折成整毫秒再拆位：按分量各自取整时，小数部分 ≥ 0.9995 会算出 `,1000`，
+/// 既不是合法 SRT（毫秒必须 < 1000）也不会向秒进位，这条字幕在严格播放器上不显示。
 fn srt_time(sec: f64) -> String {
-    let total = sec.max(0.0);
-    let h = (total / 3600.0).floor() as i64;
-    let m = ((total % 3600.0) / 60.0).floor() as i64;
-    let s = (total % 60.0).floor() as i64;
-    let ms = ((total - total.floor()) * 1000.0).round() as i64;
+    let total_ms = (sec.max(0.0) * 1000.0).round() as i64;
+    let ms = total_ms % 1000;
+    let total_s = total_ms.div_euclid(1000);
+    let s = total_s % 60;
+    let m = (total_s / 60) % 60;
+    let h = total_s / 3600;
     format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
@@ -1055,6 +1059,9 @@ mod pick_tests {
         assert_eq!(srt_time(0.0), "00:00:00,000");
         assert_eq!(srt_time(1.5), "00:00:01,500");
         assert_eq!(srt_time(3723.456), "01:02:03,456");
+        // 小数部分 ≥ 0.9995：按分量各自取整会算出 ,1000，那不是合法 SRT
+        assert_eq!(srt_time(5.9997), "00:00:06,000");
+        assert_eq!(srt_time(119.9996), "00:02:00,000");
     }
 
     #[test]
