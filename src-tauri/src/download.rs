@@ -1546,4 +1546,37 @@ Connection: close
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // 窗口对不上就写不进去：服务器答 200 或给别的区间时，盘上那段字节不属于请求的
+    // 窗口，拼出来的 .part 内容是错的，而且不会报任何错。
+    #[test]
+    fn content_range_only_passes_when_it_matches_the_requested_window() {
+        assert!(content_range_matches("bytes 0-99/1000", 0, 99));
+        assert!(!content_range_matches("bytes 100-199/1000", 0, 99), "区间不同");
+        assert!(!content_range_matches("bytes */1000", 0, 99), "没给区间");
+        assert!(!content_range_matches("bytes 0-99", 0, 99), "没给总长");
+        assert!(!content_range_matches("0-99/1000", 0, 99), "缺 bytes 前缀");
+        assert!(!content_range_matches("bytes a-b/1000", 0, 99), "非数字");
+    }
+
+    // 重试同一个窗口时，上一轮已经数过一遍的字节要退回来。不退进度会提前冲到 100%，
+    // 退多了又会倒着走。
+    #[test]
+    fn tracker_sub_pulls_back_the_bytes_a_retry_never_wrote() {
+        let ticks: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+        let note: Note<'_> = &|got, _, _| ticks.lock().unwrap().push(got);
+        let t = Tracker::new(Some(1000), note);
+        t.add(400);
+        t.sub(400);
+        assert_eq!(t.received(), 0, "没写进盘的 400 字节要从进度里退掉");
+        assert_eq!(
+            *ticks.lock().unwrap().last().unwrap(),
+            0,
+            "最后一次回报该是 0，不是 400"
+        );
+        t.sub(0);
+        assert_eq!(t.received(), 0, "退 0 是空操作，不该把计数搞坏");
+        t.add(100);
+        assert_eq!(t.received(), 100);
+    }
 }
