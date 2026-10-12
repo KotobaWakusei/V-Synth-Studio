@@ -429,7 +429,7 @@ export const api = {
             format: string
             downgraded: boolean
         }>('lyrics_song', {args: payload}),
-    lyricsSms: (phone: string) => call<{ ok?: boolean }>('lyrics_login_sms', {args: {phone}}),
+    lyricsSms: (phone: string) => call<{ sent: boolean; phone: string }>('lyrics_login_sms', {args: {phone}}),
     lyricsCellphone: (phone: string, captcha: string) =>
         call<{
             loggedIn: boolean
@@ -619,7 +619,7 @@ export interface VideoFormat {
 interface AudioProbe {
     info: {
         durationSec: number
-        audio?: { codec?: string; sampleRate?: number; channels?: number; bitRate?: number }
+        audio?: { codec?: string; sampleRate?: number; channels?: number; bitrate?: number }
         video?: { codec?: string; width?: number; height?: number }
     }
 }
