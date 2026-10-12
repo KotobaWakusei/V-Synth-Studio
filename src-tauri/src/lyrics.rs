@@ -1561,12 +1561,26 @@ fn pick_trans(list: &[(u64, String)], ms: u64) -> Option<String> {
         .map(|(_, text)| text.clone())
 }
 
+/// 行首**连续**的时间标签（沿用原文的写法，不重新格式化）。
+/// 遇到第一个不是时间的 `[...]` 就停 —— `[ar:xx]` 这类元数据不参与配对。
+fn time_tags(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = line.trim_start();
+    while let Some(stripped) = rest.strip_prefix('[') {
+        let Some(end) = stripped.find(']') else { break };
+        let tag = format!("[{}]", &stripped[..end]);
+        if parse_timestamp(&tag).is_none() {
+            break;
+        }
+        out.push(tag);
+        rest = &stripped[end + 1..];
+    }
+    out
+}
+
 /// 行首第一个真正的时间标签（沿用原文的写法，不重新格式化）
 fn first_tag(line: &str) -> Option<String> {
-    let stripped = line.trim_start().strip_prefix('[')?;
-    let end = stripped.find(']')?;
-    let tag = format!("[{}]", &stripped[..end]);
-    parse_timestamp(&tag).map(|_| tag)
+    time_tags(line).into_iter().next()
 }
 
 /// 原文 + 译文合成双语 LRC：译文行插在原文行后面，沿用原文那行的时间标签。
@@ -1585,17 +1599,23 @@ pub fn merge_lrc(raw: &str, trans: &str) -> String {
     for line in normalized.lines() {
         out.push_str(line);
         out.push('\n');
-        let Some(tag) = first_tag(line) else { continue };
-        let Some(ms) = parse_timestamp(&tag) else {
-            continue;
-        };
-        if let Some(text) = pick_trans(&trans_lines, ms) {
+        /* 一行可以挂多个时间标签（副歌重复是常见写法）。只补第一个的话，
+        后面几处重复就没有译文 —— 而 `lrc_to_srt` 走 `parse_lrc` 是每个标签各展开
+        一条，同一份输入导出 SRT 是双语、导出 LRC 却只剩半双语。 */
+        for tag in time_tags(line) {
+            let Some(ms) = parse_timestamp(&tag) else {
+                continue;
+            };
+            let Some(text) = pick_trans(&trans_lines, ms) else {
+                continue;
+            };
             let text = text.trim();
-            if !text.is_empty() {
-                out.push_str(&tag);
-                out.push_str(text);
-                out.push('\n');
+            if text.is_empty() {
+                continue;
             }
+            out.push_str(&tag);
+            out.push_str(text);
+            out.push('\n');
         }
     }
     out
@@ -2043,6 +2063,22 @@ mod tests {
             merged,
             "[ti:x]\n[00:12.00]原文\n[00:12.00]译文\n[00:15.00]第二句\n"
         );
+    }
+
+    // 副歌重复常见写法：一行挂两个时间标签。只补第一个的话第二处重复没有译文，
+    // 而同一份输入走 lrc_to_srt 是每个标签各展开一条 —— 导出 SRT 双语、导出 LRC 半双语。
+    #[test]
+    fn merges_every_tag_on_a_multi_timestamp_line() {
+        let merged = merge_lrc(
+            "[00:12.00][01:20.00]副歌\n[00:30.00]主歌\n",
+            "[00:12.00]Chorus\n[01:20.00]Chorus again\n[00:30.00]Verse\n",
+        );
+        assert_eq!(
+            merged,
+            "[00:12.00][01:20.00]副歌\n[00:12.00]Chorus\n[01:20.00]Chorus again\n[00:30.00]主歌\n[00:30.00]Verse\n"
+        );
+        // 元数据标签不是时间，不能被当成时间标签去配译文
+        assert_eq!(merge_lrc("[ti:x]\n", "[ti:x]\n"), "[ti:x]\n");
     }
 
     #[test]
