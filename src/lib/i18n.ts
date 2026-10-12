@@ -626,6 +626,11 @@ const DICT: Record<string, Record<UiLanguage, string>> = {
     /* ── 更新提醒（`update.rs` 的回包 + 启动时那次静默检查） ── */
     "有新版本": {"zh-CN": "有新版本", "en-US": "New version available", "ja-JP": "新しいバージョンがあります"},
     "打开发布页": {"zh-CN": "打开发布页", "en-US": "Open release page", "ja-JP": "リリースページを開く"},
+    "打开发布页失败": {
+        "zh-CN": "打开发布页失败",
+        "en-US": "Could not open the release page",
+        "ja-JP": "リリースページを開けませんでした"
+    },
     "稍后再说": {"zh-CN": "稍后再说", "en-US": "Later", "ja-JP": "あとで"},
     "发布于": {"zh-CN": "发布于", "en-US": "Published", "ja-JP": "公開"},
     "（预览版）": {"zh-CN": "（预览版）", "en-US": " (pre-release)", "ja-JP": "（プレリリース）"},
