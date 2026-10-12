@@ -54,9 +54,9 @@ export function renderSubDir(parsed: VideoParse | null, qualityName: string, tem
         .trim()
 }
 
+/** 解析出**几个可选的视频**（分 P / 剧集）。yt-dlp 那边后端不发 `pages`，一个链接就是一个。 */
 export function countItems(d: VideoParse | null): number {
     if (!d) return 0
-    if (d.source === 'ytdlp') return (d.info?.formats ?? []).filter((f) => f.isVideo).length
     if (d.kind === 'bangumi') return (d.info?.episodes ?? []).length
     return Math.max(1, (d.info?.pages ?? []).length)
 }
