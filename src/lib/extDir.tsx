@@ -66,7 +66,9 @@ export function ExtDirAsk({onDecided}: { onDecided?: (info: ExtDirInfo) => void 
     }
 
     const close = (ok: boolean, next?: ExtDirInfo) => {
-        askedThisRun = true
+        /* 只有用户真做了选择才算「问过」。把取消也记上的话，下次点安装会被
+           `askExtDirOnce` 直接放行，悄悄把那 8 GB 装进默认位置（C 盘）。 */
+        if (ok) askedThisRun = true
         if (next) onDecided?.(next)
         const r = resolve.current
         resolve.current = null
