@@ -571,9 +571,10 @@ async fn download_bilibili(
                 &on_audio,
             );
             let (vr, ar) = tokio::join!(video_fut, audio_fut);
-            // 合并已经不可能了，另一半留在目录里用户也不会去点：
-            // 这两个 .m4s 是中间产物，不进 `written`，留着就是没人认领的垃圾。
-            if let Err(e) = vr.or(ar) {
+            // 一半失败合并就不可能成；`and` 保留「任一边失败即失败」的原语义
+            // （`or` 只在两边都失败时才报错，单边失败会带着缺失的输入进 ffmpeg）。
+            // 这两个 .m4s 是中间产物，不进 `written`，删掉免得留成没人认领的垃圾。
+            if let Err(e) = vr.and(ar) {
                 let _ = std::fs::remove_file(&video_dest);
                 let _ = std::fs::remove_file(&audio_dest);
                 return Err(e);
