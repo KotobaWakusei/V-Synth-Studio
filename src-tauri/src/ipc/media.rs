@@ -286,6 +286,12 @@ pub async fn video_download(st: super::St<'_>, args: Value) -> Cmd {
                 .map(String::from)
         })
         .unwrap_or_default();
+    /* ⚠️ 空目录必须挡：`create_dir_all("")` 是 std 的特例、直接回 Ok，
+    于是所有产物按相对路径落到进程 CWD（装在 Program Files 时是一片权限错误，
+    否则文件散落安装目录）。前端目前会先拦，这里是给绕过前端的调用兜底。 */
+    if target_dir.trim().is_empty() {
+        return Err("没有输出目录：先到设置里选一个下载目录".into());
+    }
     std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
 
     let title = format!("下载 {}", url.chars().take(60).collect::<String>());
@@ -565,8 +571,13 @@ async fn download_bilibili(
                 &on_audio,
             );
             let (vr, ar) = tokio::join!(video_fut, audio_fut);
-            vr?;
-            ar?;
+            // 合并已经不可能了，另一半留在目录里用户也不会去点：
+            // 这两个 .m4s 是中间产物，不进 `written`，留着就是没人认领的垃圾。
+            if let Err(e) = vr.or(ar) {
+                let _ = std::fs::remove_file(&video_dest);
+                let _ = std::fs::remove_file(&audio_dest);
+                return Err(e);
+            }
             (video_dest, audio_dest)
         };
 
@@ -600,7 +611,12 @@ async fn download_bilibili(
                     written.push(mp4_dest.clone());
                     super::jobs::log_job(st, job, &format!("已合并输出：{}", basename(&mp4_dest)));
                 }
-                Err(e) if e == CANCELED => return Err(e),
+                Err(e) if e == CANCELED => {
+                    // 中间产物不进 `written`，不删就成了没人认领的几个 GB
+                    let _ = std::fs::remove_file(&video_dest);
+                    let _ = std::fs::remove_file(&audio_dest);
+                    return Err(e);
+                }
                 Err(e) => {
                     super::jobs::log_job(
                         st,
