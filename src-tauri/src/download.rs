@@ -66,6 +66,10 @@ const CHUNK_MIN_SIZE: u64 = 2 * 1024 * 1024;
 /// 不外泄 —— 对外是 [`Outcome`]。
 const STOPPED: &str = "__stopped__";
 
+/// 分块专用哨兵：服务端对 `Range` 回了 200（整份），再重试也是同样结果，
+/// 调用方拿到它应当直接退回单流而不是把五次重试烧完。
+const CHUNK_UNSUPPORTED: &str = "服务端忽略了 Range 请求，不能分块下载";
+
 /// 进度回调报的是**哪一段**：还在下，还是（调用方的）解压阶段。
 ///
 /// 为什么非有这个区分不可：下载与解压共用同一个 `on_progress` 通道，而解压的
@@ -663,13 +667,23 @@ async fn download_range(
     ctl: &Control<'_>,
 ) -> Result<(), String> {
     let mut last = String::new();
+    // 每一轮往 tracker 里记了多少：重试要先把上一轮扣掉，
+    // 否则同一个窗口数两遍，进度会先到 100% 而文件还没下全。
+    let mut counted: u64 = 0;
     for attempt in 0..=4u32 {
         if (ctl.check)() {
             return Err(STOPPED.to_string());
         }
-        match download_range_once(fetch, req, hdrs, start, end, tracker).await {
+        match download_range_once(fetch, req, hdrs, start, end, tracker, ctl, &mut counted).await {
             Ok(()) => return Ok(()),
             Err(e) => {
+                /* 服务端不肯按 Range 给：再试四次也是同样结果，直接放出去
+                让外层退回单流。用户按了停止同理 —— 停就停，别再睡一轮。 */
+                if e.starts_with(CHUNK_UNSUPPORTED) || e == STOPPED {
+                    return Err(e);
+                }
+                tracker.sub(counted);
+                counted = 0;
                 last = e;
                 if attempt < 4 {
                     tokio::time::sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
@@ -687,6 +701,8 @@ async fn download_range_once(
     start: u64,
     end: u64,
     tracker: &Tracker<'_>,
+    ctl: &Control<'_>,
+    counted: &mut u64,
 ) -> Result<(), String> {
     let mut h = hdrs.clone();
     h.insert(
@@ -701,8 +717,27 @@ async fn download_range_once(
         .await
         .map_err(|e| friendly(&e))?;
     let status = res.status().as_u16();
-    if !(200..300).contains(&status) {
+    /* ⚠️ 200 必须挡住。RFC 9110 允许服务端忽略 Range 而整份回 200，
+    这时每个分块都从自己的 `start` 写整份 body，块间互相重叠或留洞 ——
+    成品是坏文件，而且 download() 随后 rename 会把它当成功提交，用户一点提示都收不到。 */
+    if status == 200 {
+        return Err(format!("{CHUNK_UNSUPPORTED}（{fetch}）"));
+    }
+    if status != 206 {
         return Err(format!("分块下载失败 HTTP {status}（{fetch}）"));
+    }
+    /* ⚠️ 认了 206 还要核对回的正是这个窗口：窗口偏了照样写坏成品。
+    头缺席时不判死，交给下面的字节数核对兜底。 */
+    if let Some(cr) = res
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+    {
+        if !content_range_matches(cr, start, end) {
+            return Err(format!(
+                "分块下载：服务端回的区间不是 {start}-{end}（{cr}，{fetch}）"
+            ));
+        }
     }
 
     /* ⚠️ **必须是可写的句柄。** 用 `File::open`（`O_RDONLY`）时 Windows 的
@@ -717,11 +752,48 @@ async fn download_range_once(
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| e.to_string())?;
+        /* ⚠️ 越过窗口边界 = 回的区间比要的长，写下去会盖掉下一块。
+        到这儿才判，是因为头可以骗人、盘上的字节数不会。 */
+        if pos.saturating_add(chunk.len() as u64) > end + 1 {
+            return Err(format!(
+                "分块下载：服务端给的字节超出 {start}-{end}（{fetch}）"
+            ));
+        }
         write_at(&file, &chunk, pos).map_err(|e| e.to_string())?;
         pos += chunk.len() as u64;
         tracker.add(chunk.len() as u64);
+        *counted += chunk.len() as u64;
+        // ⚠️ 与单流同款：判据放在写盘之后、下一块之前，否则一次停止会多下几 MB
+        if (ctl.check)() {
+            return Err(STOPPED.to_string());
+        }
+    }
+    // 头对了、字节数也要对：窗口比要的短时 pos 停在 end 之前，成品留个洞
+    let want = end - start + 1;
+    if pos < end + 1 {
+        return Err(format!(
+            "分块下载：区间 {start}-{end} 只下到 {} / {want} 字节（{fetch}）",
+            pos - start
+        ));
     }
     Ok(())
+}
+
+/// `Content-Range: bytes 100-199/1234` —— 核对它说的正是我们要的窗口。
+fn content_range_matches(value: &str, start: u64, end: u64) -> bool {
+    let Some(spec) = value.trim().strip_prefix("bytes ") else {
+        return false;
+    };
+    let Some((span, _total)) = spec.split_once('/') else {
+        return false;
+    };
+    let Some((s, e)) = span.split_once('-') else {
+        return false;
+    };
+    match (s.trim().parse::<u64>(), e.trim().parse::<u64>()) {
+        (Ok(s), Ok(e)) => s == start && e == end,
+        _ => false,
+    }
 }
 
 /// 定位写入。每个分块任务各持一个文件句柄，所以不能用共享的 seek 位置。
@@ -823,6 +895,15 @@ impl<'a> Tracker<'a> {
 
     fn add(&self, n: u64) {
         let got = self.received.fetch_add(n, Ordering::Relaxed) + n;
+        self.tick(got, self.total);
+    }
+
+    /// 把 `n` 退回去（重试同一个窗口时，上一轮已经数过一遍）。
+    fn sub(&self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        let got = self.received.fetch_sub(n, Ordering::Relaxed) - n;
         self.tick(got, self.total);
     }
 
