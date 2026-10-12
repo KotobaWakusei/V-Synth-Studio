@@ -102,7 +102,21 @@ fn iso_date(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Windows 挡在文件系统层的保留设备名（大小写不敏感，`CON.txt` 这种带扩展名的写法也算）。
+const WINDOWS_RESERVED: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    WINDOWS_RESERVED.contains(&stem.trim().to_ascii_uppercase().as_str())
+}
+
 /// 文件名友好的标题
+///
+/// ⚠️ 标题撞上 Windows 保留设备名时，同一次下载的全部产物（音视频、封面、弹幕、字幕）
+/// 都会创建失败，而标题由 up 主控制、撞名可预期，所以这里必须自己改名。
 pub fn safe_title(title: &str) -> String {
     let cleaned: String = title
         .chars()
@@ -117,11 +131,22 @@ pub fn safe_title(title: &str) -> String {
         })
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let trimmed = collapsed.trim();
+    // 尾部的点在 Windows 上会被剥掉，"a." 与 "a" 是同一个文件
+    let trimmed: String = collapsed
+        .trim()
+        .chars()
+        .take(100)
+        .collect::<String>()
+        .trim_end_matches('.')
+        .to_string();
     if trimmed.is_empty() {
         return "video".to_string();
     }
-    trimmed.chars().take(100).collect()
+    if is_windows_reserved(&trimmed) {
+        format!("_{trimmed}")
+    } else {
+        trimmed
+    }
 }
 
 /* ══════════════════════════════════ WBI 签名 ══════════════════════════════════ */
@@ -1265,6 +1290,20 @@ mod tests {
         assert_eq!(safe_title("  hello   world  "), "hello world");
         assert_eq!(safe_title(""), "video");
         assert_eq!(safe_title("///"), "___");
+    }
+
+    // 标题撞上 Windows 保留设备名时，同一次下载的音视频、封面、弹幕、字幕全部创建失败。
+    #[test]
+    fn safe_title_never_yields_a_windows_reserved_device_name() {
+        for raw in ["CON", "con", "CON.mp4", "nul.txt", "com1", "LPT9"] {
+            assert!(is_windows_reserved(raw), "输入本身该被判为保留名：{raw}");
+            assert!(
+                !is_windows_reserved(&safe_title(raw)),
+                "输出不该再是保留名：{raw}"
+            );
+        }
+        assert_eq!(safe_title("CON"), "_CON");
+        assert_eq!(safe_title("普通标题"), "普通标题");
     }
 
     #[test]
