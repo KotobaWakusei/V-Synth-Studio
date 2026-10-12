@@ -173,6 +173,15 @@ pub async fn convert_preview(st: super::St<'_>, args: Value) -> Cmd {
                         findings.push(json!({ "level": "warn",
                             "message": "目标格式不承载歌词。".to_string() }));
                     }
+                    if !limits.notes && notes > 0 {
+                        findings.push(json!({ "level": "warn",
+                            "message": format!("目标格式只保存歌词文本，{notes} 个音符与时值会全部丢弃。") }));
+                    }
+                } else if !to.is_empty() {
+                    /* 表里没有的格式**不能装作没问题**：预检的职责就是说出丢什么，
+                    漏判的后果是用户以为查过了。 */
+                    findings.push(json!({ "level": "warn",
+                        "message": format!("预检还不认识目标格式「{to}」，多轨、音高曲线与歌词能否保留无法判断，请转换后自行核对。") }));
                 }
             }
             Err(e) => findings.push(json!({ "level": "err", "message": format!("读取失败：{e}") })),
@@ -193,39 +202,56 @@ struct Capability {
     pitch: bool,
     multi_track: bool,
     lyrics: bool,
+    /// 目标格式只承载文本行时，音符与时值整份丢弃 —— 不只是一条音高曲线没了
+    notes: bool,
 }
+
+/// 随包 LibreSVIP 的 40 个插件里，歌声工程类格式的能力是一样的：
+/// 音高、多轨、歌词都带。表外的格式**必须**由 [`capability`] 返回 `None`，
+/// 让预检去报「不认识」，而不是默默什么都不提示。
+const VOCAL_PROJECT: &[&str] = &[
+    // 既有条目
+    "vsqx", "vpr", "vsq", "svp", "s5p", "ustx", "ccs", "acep", "dv", "dspx", "ufdata",
+    // 随包另外 22 个插件（原先不在表里，预检对它们一句话都不说）
+    "ace", "aisp", "ds", "json", "mtp", "nn", "ppsf", "ps_project", "svip", "svip3", "tlp",
+    "tlpx", "tsmsln", "tssln", "vfp", "vog", "vshp", "vspx", "vvproj", "vxf", "xvsq", "y77",
+];
 
 fn capability(format: &str) -> Option<Capability> {
     let c = match format {
         // 乐谱类：有音高概念，但没有实际音高曲线；不带歌词（除非手动填）
-        "musicxml" => Capability {
+        "musicxml" | "mid" => Capability {
             pitch: false,
             multi_track: true,
             lyrics: true,
-        },
-        "mid" => Capability {
-            pitch: false,
-            multi_track: true,
-            lyrics: true,
+            notes: true,
         },
         // UTAU 单轨
         "ust" => Capability {
             pitch: false,
             multi_track: false,
             lyrics: true,
+            notes: true,
         },
-        // 歌词/字幕类：只有文本和时值
-        "lrc" | "ass" | "srt" | "svg" => Capability {
+        // 纯文本行：只有歌词和时间，音符与时值一个都留不下
+        "lrc" | "ass" | "srt" => Capability {
             pitch: false,
             multi_track: false,
             lyrics: true,
+            notes: false,
         },
-        // 歌声工程类：什么都有
-        "vsqx" | "vpr" | "vsq" | "svp" | "s5p" | "ustx" | "ccs" | "acep" | "dv" | "dspx"
-        | "ufdata" => Capability {
+        // svg 画的就是音符与音高，内容留得下（只是不能反向编辑）
+        "svg" => Capability {
+            pitch: false,
+            multi_track: false,
+            lyrics: true,
+            notes: true,
+        },
+        id if VOCAL_PROJECT.contains(&id) => Capability {
             pitch: true,
             multi_track: true,
             lyrics: true,
+            notes: true,
         },
         _ => return None,
     };
@@ -513,5 +539,38 @@ mod tests {
         let third = reserve_unique_path(base.clone()).expect("reservation after release");
         assert_eq!(third.path(), base);
         drop(third);
+    }
+
+    // 能力表的真源是随包插件目录。表漏一个 id，预检对那种目标格式就一句提示都没有
+    // —— 用户以为查过了，多轨 / 音高 / 歌词照样静默丢。这里同时钉两件事：
+    // 这一版随包的 40 个 id 都在表里；本地拉下 tools/ 之后，新插件也会被抓到。
+    #[test]
+    fn every_bundled_plugin_id_has_a_capability_entry() {
+        const BUNDLED: [&str; 40] = [
+            "ace", "acep", "aisp", "ass", "ccs", "ds", "dspx", "dv", "json", "lrc", "mid", "mtp",
+            "musicxml", "nn", "ppsf", "ps_project", "s5p", "srt", "svg", "svip", "svip3", "svp",
+            "tlp", "tlpx", "tsmsln", "tssln", "ufdata", "ust", "ustx", "vfp", "vog", "vpr", "vshp",
+            "vspx", "vsq", "vsqx", "vvproj", "vxf", "xvsq", "y77",
+        ];
+        for id in BUNDLED {
+            assert!(capability(id).is_some(), "能力表漏了「{id}」");
+        }
+
+        // `tools/` 是本地拉的构建产物、不入库，拿不到就只核上面那份清单
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tools/libresvip/libresvip-cli/_internal/libresvip/plugins");
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            if !e.path().is_dir() {
+                continue;
+            }
+            let id = e.file_name().to_string_lossy().to_string();
+            assert!(
+                capability(&id).is_some(),
+                "随包新插件「{id}」没有能力条目 —— 预检会静默跳过它"
+            );
+        }
     }
 }
