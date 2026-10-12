@@ -102,7 +102,21 @@ fn iso_date(secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Windows 挡在文件系统层的保留设备名（大小写不敏感，`CON.txt` 这种带扩展名的写法也算）。
+const WINDOWS_RESERVED: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    WINDOWS_RESERVED.contains(&stem.trim().to_ascii_uppercase().as_str())
+}
+
 /// 文件名友好的标题
+///
+/// ⚠️ 标题撞上 Windows 保留设备名时，同一次下载的全部产物（音视频、封面、弹幕、字幕）
+/// 都会创建失败，而标题由 up 主控制、撞名可预期，所以这里必须自己改名。
 pub fn safe_title(title: &str) -> String {
     let cleaned: String = title
         .chars()
@@ -117,11 +131,22 @@ pub fn safe_title(title: &str) -> String {
         })
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let trimmed = collapsed.trim();
+    // 尾部的点在 Windows 上会被剥掉，"a." 与 "a" 是同一个文件
+    let trimmed: String = collapsed
+        .trim()
+        .chars()
+        .take(100)
+        .collect::<String>()
+        .trim_end_matches('.')
+        .to_string();
     if trimmed.is_empty() {
         return "video".to_string();
     }
-    trimmed.chars().take(100).collect()
+    if is_windows_reserved(&trimmed) {
+        format!("_{trimmed}")
+    } else {
+        trimmed
+    }
 }
 
 /* ══════════════════════════════════ WBI 签名 ══════════════════════════════════ */
@@ -979,10 +1004,37 @@ impl Bili {
 
 /* ══════════════════════════════════ 输入解析小工具 ══════════════════════════════════ */
 
+/// 在 `hay` 里做 ASCII 大小写不敏感查找，返回 **`hay` 自己的字节下标**。
+///
+/// ⚠️ 不能改成「`hay.to_lowercase()` 再 `find`」：小写化会改变字节长度
+///（`İ` U+0130 由 2 字节变成 3 字节），拿到的下标对不上原串，
+/// 后面 `hay[idx..]` 要么越界、要么切在多字节字符中间 —— release 是 `panic = "abort"`。
+///
+/// 命中处一定是 ASCII 字节（非 ASCII 字节与 ASCII 值 `eq_ignore_ascii_case` 恒不等），
+/// 所以返回的下标同时是 `hay` 自己的合法字符边界。
+fn find_ascii_ci(hay: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let hb = hay.as_bytes();
+    let nb = needle.as_bytes();
+    if nb.len() > hb.len() {
+        return None;
+    }
+    'at: for i in 0..=(hb.len() - nb.len()) {
+        for j in 0..nb.len() {
+            if !hb[i + j].eq_ignore_ascii_case(&nb[j]) {
+                continue 'at;
+            }
+        }
+        return Some(i);
+    }
+    None
+}
+
 /// `/bangumi/play/ep123` 这类固定前缀后面的数字
 fn digits_after(text: &str, prefix: &str) -> Option<i64> {
-    let lower = text.to_lowercase();
-    let idx = lower.find(&prefix.to_lowercase())? + prefix.len();
+    let idx = find_ascii_ci(text, prefix)? + prefix.len();
     let digits: String = text[idx..]
         .chars()
         .take_while(|c| c.is_ascii_digit())
@@ -1010,10 +1062,9 @@ fn find_bv(text: &str) -> Option<String> {
 
 /// `?p=3` / `&p=3` 里的数字
 fn param_number(url: &str, name: &str) -> Option<i64> {
-    let lower = url.to_lowercase();
     for sep in ['?', '&'] {
-        let needle = format!("{sep}{}=", name.to_lowercase());
-        if let Some(idx) = lower.find(&needle) {
+        let needle = format!("{sep}{name}=");
+        if let Some(idx) = find_ascii_ci(url, &needle) {
             let digits: String = url[idx + needle.len()..]
                 .chars()
                 .take_while(|c| c.is_ascii_digit())
@@ -1265,6 +1316,40 @@ mod tests {
         assert_eq!(safe_title("  hello   world  "), "hello world");
         assert_eq!(safe_title(""), "video");
         assert_eq!(safe_title("///"), "___");
+    }
+
+    // 标题撞上 Windows 保留设备名时，同一次下载的音视频、封面、弹幕、字幕全部创建失败。
+    #[test]
+    fn safe_title_never_yields_a_windows_reserved_device_name() {
+        for raw in ["CON", "con", "CON.mp4", "nul.txt", "com1", "LPT9"] {
+            assert!(is_windows_reserved(raw), "输入本身该被判为保留名：{raw}");
+            assert!(
+                !is_windows_reserved(&safe_title(raw)),
+                "输出不该再是保留名：{raw}"
+            );
+        }
+        assert_eq!(safe_title("CON"), "_CON");
+        assert_eq!(safe_title("普通标题"), "普通标题");
+    }
+
+    // 前缀段里出现 İ（2 字节小写成 3 字节）时，旧实现在小写串上取下标再去切原串，
+    // 于是越界 panic；release 是 panic = "abort"，粘一个这样的链接就整个进程退出。
+    #[test]
+    fn link_parsing_survives_multibyte_chars_before_the_match() {
+        assert_eq!(
+            digits_after("https://bilibili.com/İ/bangumi/play/ep7788", "/bangumi/play/ep"),
+            Some(7788)
+        );
+        assert_eq!(param_number("https://bilibili.com/İ?P=3", "p"), Some(3));
+        // 大小写不敏感的语义不能因为换实现而丢掉
+        assert_eq!(
+            digits_after("https://www.BILIBILI.com/bangumi/play/EP42", "/bangumi/play/ep"),
+            Some(42)
+        );
+        assert_eq!(
+            digits_after("https://bilibili.com/İ/bangumi/play/xyz", "/bangumi/play/ep"),
+            None
+        );
     }
 
     #[test]

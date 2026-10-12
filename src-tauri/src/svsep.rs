@@ -2419,7 +2419,9 @@ fn extract_from<R: std::io::Read + std::io::Seek>(
             .map_err(|e| format!("读第 {i} 个条目失败：{e}"))?;
         // 跳过的条目（目录、空名）也要推进进度，否则分母算了它们、
         // 分子没算，进度条就永远到不了头（单测钉着这一条）。
-        done_src += e.compressed_size().max(1);
+        // ⚠️ 记账要在这一个条目**真正解完之后**：先加后解的话，最大的那个文件
+        // 排在靠后时进度会先冲到 100% 再长时间不动，看着就是卡死。
+        let entry_src = e.compressed_size().max(1);
 
         let raw_name = e.name().replace('\\', "/");
         /* ⚠️ 用 `enclosed_name()` 而不是 `mangled_name()`/`sanitized_name()`：
@@ -2456,6 +2458,7 @@ fn extract_from<R: std::io::Read + std::io::Seek>(
             report.files += 1;
             report.bytes += w.metadata().map(|m| m.len()).unwrap_or(0);
         }
+        done_src += entry_src;
         on_progress(done_src, total_src);
     }
     Ok(report)

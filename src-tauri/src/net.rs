@@ -245,10 +245,19 @@ pub async fn download_to_file(
             });
             Ok(bytes)
         }
-        Ok(crate::download::Outcome::Cancelled) => Err(CANCELED.to_string()),
+        /* ⚠️ 取消要顺手把 `.part` 删掉：引擎只在「允许续传」时清理，而 bili 这条
+        路是 `Parallel`（每次开头反会先删旧 part），留下的 `.part` 永远不会被
+        续传消费，纯粹是留在用户下载目录里的几个 GB 垃圾。 */
+        Ok(crate::download::Outcome::Cancelled) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            Err(CANCELED.to_string())
+        }
         // bili 没有「暂停」这个概念（`cancel_only` 让引擎永远不返回它），
         // 真收到了也按取消处理，免得留下一个没人认领的 `.part`
-        Ok(crate::download::Outcome::Paused { .. }) => Err(CANCELED.to_string()),
+        Ok(crate::download::Outcome::Paused { .. }) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            Err(CANCELED.to_string())
+        }
         Err(e) => Err(e),
     }
 }

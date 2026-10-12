@@ -357,7 +357,12 @@ export default function App() {
                                 variant="primary"
                                 icon="external"
                                 onClick={() => {
-                                    void api.fsOpen({url: update?.url ?? ''})
+                                    /* 打不开不能只进控制台：用户按了按钮却什么都没发生，
+                                       连「打不开」都不知道。url 为空也会走这条（后端回 400）。 */
+                                    api.fsOpen({url: update?.url ?? ''}).catch((e: unknown) => {
+                                        const msg = e instanceof Error ? e.message : String(e)
+                                        toast(`${t('打开发布页失败')}：${msg}`, 'err')
+                                    })
                                     setUpdateOpen(false)
                                 }}
                             >

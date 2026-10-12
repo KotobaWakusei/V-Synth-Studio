@@ -281,11 +281,17 @@ pub async fn midi_transcribe(st: super::St<'_>, args: Value) -> Cmd {
         );
     };
 
+    /* ⚠️ 检查与占位必须在**同一次持锁**里做。分两步写（先看、后放）时两次并发提交
+    都能通过检查，后写者还会覆盖前一个任务的 `Cancel` 句柄 —— 从此第一个任务
+    `midi_cancel` 永远比不中 id，只能等它自己跑完，而「一次只跑一个」也名存实亡。
+    这里先用空 id 占住（下面到写 id 为止没有任何失败分支），拿到 job_id 后再补上。 */
+    let cancel = mt::Cancel::new();
     {
-        let guard = RUNNING.lock().map_err(|_| "任务表坏了".to_string())?;
+        let mut guard = RUNNING.lock().map_err(|_| "任务表坏了".to_string())?;
         if guard.is_some() {
             return Err("已经有一次扒谱在跑了。这个功能一次只跑一个（CPU 都被它占着）。".into());
         }
+        *guard = Some((String::new(), cancel.clone()));
     }
 
     let out_dir = args
@@ -325,10 +331,14 @@ pub async fn midi_transcribe(st: super::St<'_>, args: Value) -> Cmd {
         &format!("输入：{input}（去噪 {} 步）", opts.steps),
     );
 
-    let cancel = mt::Cancel::new();
-    if let Ok(mut slot) = RUNNING.lock() {
-        *slot = Some((job_id.clone(), cancel.clone()));
-    }
+    // 把占位换成真 id。用的必须是上面占位时那把 `cancel` —— 重造一把会让
+    // 「停止」按到旧句柄上，而推理循环只认槽里这一把。
+    RUNNING
+        .lock()
+        .map_err(|_| "任务表坏了".to_string())
+        .map(|mut slot| {
+            *slot = Some((job_id.clone(), cancel.clone()));
+        })?;
 
     let st2 = Arc::clone(&st_arc);
     let id2 = job_id.clone();

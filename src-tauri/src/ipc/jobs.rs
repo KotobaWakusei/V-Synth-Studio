@@ -129,6 +129,23 @@ fn is_terminal(job: &Value) -> bool {
     )
 }
 
+/// 这个任务是不是已经被取消。
+///
+/// ⚠️ 长循环必须自己来问这一句：[`set_job`] 只保证终态不被覆盖，
+/// 挡不住已经跑着的循环继续往输出目录写文件。
+pub fn is_canceled(st: &Arc<super::AppState>, id: &str) -> bool {
+    st.jobs
+        .lock()
+        .map(|g| {
+            g.items
+                .get(id)
+                .and_then(|j| j.get("status"))
+                .and_then(|s| s.as_str())
+                == Some("canceled")
+        })
+        .unwrap_or(false)
+}
+
 /// 任务列表（不带日志，列表只要这几列）。
 #[tauri::command]
 pub async fn list_jobs(st: super::St<'_>) -> Cmd {

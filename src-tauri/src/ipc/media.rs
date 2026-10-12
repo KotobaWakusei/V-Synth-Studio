@@ -286,6 +286,12 @@ pub async fn video_download(st: super::St<'_>, args: Value) -> Cmd {
                 .map(String::from)
         })
         .unwrap_or_default();
+    /* ⚠️ 空目录必须挡：`create_dir_all("")` 是 std 的特例、直接回 Ok，
+    于是所有产物按相对路径落到进程 CWD（装在 Program Files 时是一片权限错误，
+    否则文件散落安装目录）。前端目前会先拦，这里是给绕过前端的调用兜底。 */
+    if target_dir.trim().is_empty() {
+        return Err("没有输出目录：先到设置里选一个下载目录".into());
+    }
     std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
 
     let title = format!("下载 {}", url.chars().take(60).collect::<String>());
@@ -565,8 +571,14 @@ async fn download_bilibili(
                 &on_audio,
             );
             let (vr, ar) = tokio::join!(video_fut, audio_fut);
-            vr?;
-            ar?;
+            // 一半失败合并就不可能成；`and` 保留「任一边失败即失败」的原语义
+            // （`or` 只在两边都失败时才报错，单边失败会带着缺失的输入进 ffmpeg）。
+            // 这两个 .m4s 是中间产物，不进 `written`，删掉免得留成没人认领的垃圾。
+            if let Err(e) = vr.and(ar) {
+                let _ = std::fs::remove_file(&video_dest);
+                let _ = std::fs::remove_file(&audio_dest);
+                return Err(e);
+            }
             (video_dest, audio_dest)
         };
 
@@ -600,7 +612,12 @@ async fn download_bilibili(
                     written.push(mp4_dest.clone());
                     super::jobs::log_job(st, job, &format!("已合并输出：{}", basename(&mp4_dest)));
                 }
-                Err(e) if e == CANCELED => return Err(e),
+                Err(e) if e == CANCELED => {
+                    // 中间产物不进 `written`，不删就成了没人认领的几个 GB
+                    let _ = std::fs::remove_file(&video_dest);
+                    let _ = std::fs::remove_file(&audio_dest);
+                    return Err(e);
+                }
                 Err(e) => {
                     super::jobs::log_job(
                         st,
@@ -681,14 +698,26 @@ async fn download_bilibili(
                     match net::fetch_bytes(url, net::headers(&[]), 20).await {
                         Ok(bytes) => {
                             let text = String::from_utf8_lossy(&bytes).to_string();
-                            let dest = joined(target_dir, &format!("{safe}.{lan}.srt"));
-                            let _ = std::fs::write(&dest, bcc_to_srt(&text));
-                            written.push(dest.clone());
-                            super::jobs::log_job(
-                                st,
-                                job,
-                                &format!("已保存字幕：{}（{lan_doc}）", basename(&dest)),
-                            );
+                            // `lan` 来自 B 站接口、没过任何清洗，带 `/` 或 `..` 时
+                            // 目标就落到输出目录外面去了
+                            let tag = if lan.is_empty() {
+                                "unknown".to_string()
+                            } else {
+                                safe_title(lan)
+                            };
+                            let dest = joined(target_dir, &format!("{safe}.{tag}.srt"));
+                            // 写失败不能当成功报：`files` 里推一个不存在的路径，
+                            // 用户按提示去找是找不到的（同函数的弹幕分支就分了 Err）
+                            if let Err(e) = std::fs::write(&dest, bcc_to_srt(&text)) {
+                                super::jobs::log_job(st, job, &format!("⚠ 字幕保存失败：{e}"));
+                            } else {
+                                written.push(dest.clone());
+                                super::jobs::log_job(
+                                    st,
+                                    job,
+                                    &format!("已保存字幕：{}（{lan_doc}）", basename(&dest)),
+                                );
+                            }
                         }
                         Err(e) => super::jobs::log_job(st, job, &format!("⚠ 字幕下载失败：{e}")),
                     }
@@ -1009,12 +1038,16 @@ pub fn bcc_to_srt(json_text: &str) -> String {
 }
 
 /// 秒 → `HH:MM:SS,mmm`（SRT 的时间格式，**逗号**不是点）。
+///
+/// ⚠️ 先折成整毫秒再拆位：按分量各自取整时，小数部分 ≥ 0.9995 会算出 `,1000`，
+/// 既不是合法 SRT（毫秒必须 < 1000）也不会向秒进位，这条字幕在严格播放器上不显示。
 fn srt_time(sec: f64) -> String {
-    let total = sec.max(0.0);
-    let h = (total / 3600.0).floor() as i64;
-    let m = ((total % 3600.0) / 60.0).floor() as i64;
-    let s = (total % 60.0).floor() as i64;
-    let ms = ((total - total.floor()) * 1000.0).round() as i64;
+    let total_ms = (sec.max(0.0) * 1000.0).round() as i64;
+    let ms = total_ms % 1000;
+    let total_s = total_ms.div_euclid(1000);
+    let s = total_s % 60;
+    let m = (total_s / 60) % 60;
+    let h = total_s / 3600;
     format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
@@ -1027,6 +1060,9 @@ mod pick_tests {
         assert_eq!(srt_time(0.0), "00:00:00,000");
         assert_eq!(srt_time(1.5), "00:00:01,500");
         assert_eq!(srt_time(3723.456), "01:02:03,456");
+        // 小数部分 ≥ 0.9995：按分量各自取整会算出 ,1000，那不是合法 SRT
+        assert_eq!(srt_time(5.9997), "00:00:06,000");
+        assert_eq!(srt_time(119.9996), "00:02:00,000");
     }
 
     #[test]
