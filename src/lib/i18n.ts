@@ -212,6 +212,11 @@ const DICT: Record<string, Record<UiLanguage, string>> = {
         'ja-JP': "ダウンロード先フォルダーを選択"
     },
     "下载模式": {'zh-CN': "下载模式", 'en-US': "Download mode", 'ja-JP': "ダウンロードモード"},
+    "下载音质": {
+        'zh-CN': "下载音质",
+        'en-US': "Download quality",
+        'ja-JP': "ダウンロード音質"
+    },
     "下载队列": {'zh-CN': "下载队列", 'en-US': "Download queue", 'ja-JP': "ダウンロードキュー"},
     "音频素材": {'zh-CN': "音频素材", 'en-US': "Audio source", 'ja-JP': "音声素材"},
     "未选": {'zh-CN': "未选", 'en-US': "Not selected", 'ja-JP': "未選択"},
@@ -651,6 +656,11 @@ const DICT: Record<string, Record<UiLanguage, string>> = {
         "zh-CN": "从 GitHub 的 Release 页查一次最新发布",
         "en-US": "Ask the GitHub release page for the latest version",
         "ja-JP": "GitHubのリリースページに最新版を問い合わせます"
+    },
+    "GitHub 直连不通，这次是经镜像代查的": {
+        "zh-CN": "GitHub 直连不通，这次是经镜像代查的",
+        "en-US": "GitHub is unreachable, so this check went through a mirror",
+        "ja-JP": "GitHubに直に接続できないため、ミラー経由で照会しました"
     },
     "加速": {"zh-CN": "加速", "en-US": "Faster", "ja-JP": "速く"},
     "解析 MV 链接": {"zh-CN": "解析 MV 链接", "en-US": "Parse MV link", "ja-JP": "MVリンクを解析"},
