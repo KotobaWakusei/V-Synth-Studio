@@ -77,6 +77,9 @@ const ESTIMATE_NOTE = '装了 NVIDIA 显卡会快很多'
 /** 后端探测的间隔：它要查注册表探 GPU，比状态那条贵，所以单独一个更慢的节奏 */
 const POLL_BACKEND = 8000
 
+/** 任务进度轮询连错这么多次就当这条路走不通：再问下去只会每 2 秒刷一条错误 toast */
+const POLL_GIVE_UP = 5
+
 /**
  * 推理方式 —— 原版软件标题栏上就有这个三选一（`自动 / GPU / CPU`），
  * 能不能真用上 GPU 由 Python 那边探（本机是 AMD 卡，只会回退 CPU）。
@@ -376,6 +379,7 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
     useEffect(() => {
         if (!taskId || settled) return
         let alive = true
+        let fails = 0
         const t = setInterval(async () => {
             try {
                 const v = await api.svsepTask(taskId)
@@ -388,8 +392,13 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                 } else if (v.status === 'error' || v.status === 'failed') {
                     onToast(v.error || v.message || '分离失败', 'err')
                 }
+                fails = 0
             } catch (e) {
-                if (alive) onToast(errText(e), 'err')
+                /* 轮询自己失败不算任务失败：接着问。问到次数上限才报一次并收手 */
+                if (!alive || ++fails < POLL_GIVE_UP) return
+                alive = false
+                clearInterval(t)
+                onToast(`读不到分离进度：${errText(e)}`, 'err')
             }
         }, POLL_STATUS)
         return () => {
