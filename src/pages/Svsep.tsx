@@ -508,6 +508,18 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
         }
     }
 
+    /* 取消删除：已经删掉的不会回来，只是不再往下删。后端收手要等当前这一批走完，
+       所以进度条照旧转，直到 `dl.delete.active` 自己变 false。 */
+    const doStopDeleteDeps = async () => {
+        try {
+            await api.svsepStopDeleteDeps()
+            onToast('正在取消删除…已删掉的文件不会恢复', 'info')
+            void refresh()
+        } catch (e) {
+            onToast(errText(e), 'err')
+        }
+    }
+
     const doSeparate = async () => {
         if (!file) {
             onToast('先选一个音频文件', 'warn')
@@ -798,6 +810,11 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                                 <span className="dim">{dl.delete.files} 个 / {formatBytes(dl.delete.bytes)}</span>
                             </div>
                             <ProgressBar pct={null}/>
+                            <div className="btn-row">
+                                <Button variant="ghost" icon="x" onClick={() => void doStopDeleteDeps()}>
+                                    停止删除
+                                </Button>
+                            </div>
                         </div>
                     )}
 

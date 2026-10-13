@@ -68,6 +68,11 @@ const KEEP_TASKS: usize = 8;
 static DEL_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DEL_BYTES: AtomicU64 = AtomicU64::new(0);
 static DEL_FILES: AtomicU64 = AtomicU64::new(0);
+/// 用户按了「取消删除」：删除循环下一批就收手，**已经删掉的不复原**。
+///
+/// 不能借 `DL_STOP`：那个只有下载在跑时才可能被置位，而删除命令在 `DL_ACTIVE == 0`
+/// 时才放行 —— 共用一个 flag 就意味着删除过程中没有任何代码能把它翻成 true。
+static DEL_STOP: AtomicBool = AtomicBool::new(false);
 
 /* ══════════════════════════════ 进度与状态 ══════════════════════════════ */
 
@@ -517,14 +522,15 @@ pub async fn svsep_deps_delete(st: super::St<'_>) -> Cmd {
     let writable = st.inner().svsep.writable().to_path_buf();
     DEL_BYTES.store(0, Ordering::Relaxed);
     DEL_FILES.store(0, Ordering::Relaxed);
+    DEL_STOP.store(false, Ordering::Relaxed);
 
     tokio::spawn(async move {
-        // 几万个文件，纯阻塞 IO，丢给阻塞线程池；`DL_STOP` 也当成「别删了」的开关
-        // （用户这时能按的唯一一个停止按钮就是它）。
+        // 几万个文件，纯阻塞 IO，丢给阻塞线程池；`DEL_STOP` 是「别删了」的开关
+        // （取消删除走 `svsep_deps_delete_stop`，借下载那个 flag 是翻不动的）。
         let res = tokio::task::spawn_blocking(move || {
             crate::svsep::delete_dependencies(
                 &writable,
-                || DL_STOP.load(Ordering::Relaxed),
+                || DEL_STOP.load(Ordering::Relaxed),
                 |files, bytes| {
                     DEL_FILES.store(files, Ordering::Relaxed);
                     DEL_BYTES.store(bytes, Ordering::Relaxed);
@@ -533,6 +539,7 @@ pub async fn svsep_deps_delete(st: super::St<'_>) -> Cmd {
         })
         .await;
         DEL_ACTIVE.store(false, Ordering::Relaxed);
+        DEL_STOP.store(false, Ordering::Relaxed);
         match res {
             Ok(v) => {
                 if let Ok(mut slot) = DL_ERROR.lock() {
@@ -556,6 +563,16 @@ pub async fn svsep_deps_delete(st: super::St<'_>) -> Cmd {
     });
 
     Ok(json!({ "started": true }))
+}
+
+/// 取消正在跑的「删除全部依赖」。已经删掉的文件不复原，只是不再往下删。
+#[tauri::command]
+pub async fn svsep_deps_delete_stop() -> Cmd {
+    if !DEL_ACTIVE.load(Ordering::Relaxed) {
+        return Err("现在没有在删除".into());
+    }
+    DEL_STOP.store(true, Ordering::Relaxed);
+    Ok(json!({ "stopping": true }))
 }
 
 /* ══════════════════════════════ 分离任务 ══════════════════════════════ */

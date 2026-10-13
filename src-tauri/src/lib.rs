@@ -246,6 +246,7 @@ pub fn run() {
             ipc::svsep::svsep_download_pause,
             ipc::svsep::svsep_download_stop,
             ipc::svsep::svsep_deps_delete,
+            ipc::svsep::svsep_deps_delete_stop,
             ipc::svsep::svsep_backend_status,
             ipc::svsep::svsep_inference_get,
             ipc::svsep::svsep_set_inference,
