@@ -461,6 +461,14 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
 
     /* ── 动作 ───────────────────────────────────────────── */
 
+    /* 打开输出目录。状态还没回来时 `outputsDir` 是空串 —— 直接丢给后端只会得到
+       「缺少 path」的 Err，被 `void` 吞掉之后界面上没有任何反应。所以这里既不发
+       空请求，也把失败弹出来（目录被删掉 / 被占用都要让用户知道）。 */
+    const openOutputs = () => {
+        if (!outputsDir) return
+        void api.fsOpen({path: outputsDir}).catch((e) => onToast(errText(e), 'err'))
+    }
+
     /* 暂停：`.part` 留着，下次点下载会带 Range 接着下。
        ⚠️ 后端是在**下一块数据到达时**才收手，所以按钮按下去到进度条停住之间
        还有一两秒 —— toast 说的是「正在暂停」，不是「已暂停」。 */
@@ -877,7 +885,8 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                             <Button
                                 variant="ghost"
                                 icon="folder"
-                                onClick={() => void api.fsOpen({path: st?.outputsDir})}
+                                disabled={!outputsDir}
+                                onClick={openOutputs}
                             >
                                 输出目录
                             </Button>
@@ -984,7 +993,8 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                                         <Button
                                             size="sm"
                                             icon="folder"
-                                            onClick={() => void api.fsOpen({path: st?.outputsDir})}
+                                            disabled={!outputsDir}
+                                            onClick={openOutputs}
                                         >
                                             打开输出目录
                                         </Button>
