@@ -214,6 +214,9 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
     const [fieldErr, setFieldErr] = useState('')
     /** 进度条的标题：多段导出时带上「第 n / m 段」 */
     const [jobLabel, setJobLabel] = useState('处理进度')
+    /** 从按下「开始处理」到后端把任务建出来之间 `job` 还是上一个 —— 连点会起两个任务，
+        第二个把第一个顶掉。所以用一个自己的标志，不靠 `job?.status`。 */
+    const [submitting, setSubmitting] = useState(false)
 
     /**
      * 裁剪的分段**放在页面这一层**，不放波形编辑器内部：切到别的操作再切回来时，
@@ -452,6 +455,8 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                 return
             }
         }
+        if (submitting) return
+        setSubmitting(true)
         setFieldErr('')
         setResult(null)
         setRunErr('')
@@ -498,6 +503,8 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
             const msg = errText(e)
             setRunErr(msg)
             onToast(`提交任务失败：${msg}`, 'err')
+        } finally {
+            setSubmitting(false)
         }
     }
 
@@ -552,7 +559,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
     /* ── 派生数据 ───────────────────────────────────────────── */
 
     const formatEntries = Object.entries(formats)
-    const running = job?.status === 'running'
+    const busy = submitting || job?.status === 'running'
 
     /* ── 渲染 ───────────────────────────────────────────────── */
 
@@ -929,7 +936,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                 <Panel>
                     <div className="audio-run">
                         <div className="btn-row">
-                            <Button variant="primary" size="lg" icon="zap" loading={running} onClick={run}>
+                            <Button variant="primary" size="lg" icon="zap" loading={busy} onClick={run}>
                                 开始处理
                             </Button>
                             <Button
