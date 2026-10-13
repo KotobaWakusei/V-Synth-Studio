@@ -114,7 +114,13 @@ pub async fn allow_path(app: tauri::AppHandle, path: String) -> Cmd {
     let target = if p.is_dir() {
         p.clone()
     } else {
-        p.parent().map(PathBuf::from).unwrap_or_else(|| p.clone())
+        /* 只放行「目标文件所在的那一层」。`parent()` 对 `/x.txt` 回的是 `/`，
+           对空串回的是 `Some("")` —— 把它们放出去等于把整个盘（或一个空 scope）
+           递归放行，比不放行还糟，所以直接拒绝。 */
+        match p.parent().filter(|d| !d.as_os_str().is_empty() && d.parent().is_some()) {
+            Some(d) => d.to_path_buf(),
+            None => return Err(format!("只能放行具体文件或其所在目录：{path}")),
+        }
     };
     let _ = app.asset_protocol_scope().allow_directory(&target, true);
     Ok(json!({ "allowed": crate::platform::clean_path(&target) }))
@@ -220,7 +226,9 @@ pub async fn mkdir(path: String) -> Cmd {
     if path.trim().is_empty() {
         return Err("缺少 path".into());
     }
-    std::fs::create_dir_all(&path).map_err(|e| format!("新建目录失败：{e}"))?;
+    tokio::fs::create_dir_all(&path)
+        .await
+        .map_err(|e| format!("新建目录失败：{e}"))?;
     Ok(json!({ "path": crate::platform::clean_path(std::path::Path::new(&path)) }))
 }
 
@@ -240,9 +248,13 @@ pub async fn remove_path(path: String, trash: Option<bool>) -> Cmd {
     if trash.unwrap_or(true) {
         crate::platform::move_to_trash(&p).map_err(|e| e.to_string())?;
     } else if p.is_dir() {
-        std::fs::remove_dir_all(&p).map_err(|e| format!("删除失败：{e}"))?;
+        tokio::fs::remove_dir_all(&p)
+            .await
+            .map_err(|e| format!("删除失败：{e}"))?;
     } else {
-        std::fs::remove_file(&p).map_err(|e| format!("删除失败：{e}"))?;
+        tokio::fs::remove_file(&p)
+            .await
+            .map_err(|e| format!("删除失败：{e}"))?;
     }
     Ok(json!({ "path": path }))
 }
