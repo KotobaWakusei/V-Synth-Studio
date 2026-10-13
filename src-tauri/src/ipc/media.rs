@@ -85,6 +85,11 @@ fn set_progress(
                 if !extra.is_null() {
                     if let Some(prog) = m.get_mut("progress").and_then(|v| v.as_object_mut()) {
                         if let Some(src) = extra.as_object() {
+                            /* 合并阶段传的是空对象，而并入是只进不出的：不先清，下载
+                               阶段最后那个速度/剩余就会一直挂在合并那几分钟上。 */
+                            for k in ["speedText", "etaText", "eta"] {
+                                prog.remove(k);
+                            }
                             for (k, v) in src {
                                 prog.insert(k.clone(), v.clone());
                             }
