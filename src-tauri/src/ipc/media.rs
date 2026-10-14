@@ -11,6 +11,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Map, Value, json};
@@ -1132,6 +1133,9 @@ fn cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// 把一条远端直链缓存成本机文件，回它的路径。
 ///
+/// `preview_fetch` 的临时文件序号 —— 同一 URL 的两次并发各写各的，见该函数里 `part` 的注释。
+static PREVIEW_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// 返回 `{ path, bytes, cached }`：`cached = true` 表示这次没下载（文件已存在）。
 /// 前端拿到 `path` 之后 `convertFileSrc(path)` 就能喂给 `<video>`。
 ///
@@ -1158,7 +1162,8 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("建缓存目录失败：{e}"))?;
-    let dest = dir.join(format!("{}-{}.bin", short_hash(&url), ext_hint(&parsed)));
+    let name = format!("{}-{}", short_hash(&url), ext_hint(&parsed));
+    let dest = dir.join(format!("{name}.bin"));
 
     if let Ok(md) = tokio::fs::metadata(&dest).await {
         if md.len() > 0 {
@@ -1169,7 +1174,20 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
                 "cached": true,
             }));
         }
+        /* 0 字节的残骸（旧版直接写 `dest` 留下的）：命中判据放它过去，但它占着
+        目标名，下面的改名在部分平台上会被拒，在这里就清掉。 */
+        let _ = tokio::fs::remove_file(&dest).await;
     }
+
+    /* 字节写进 `part`，整份下完才改名成 `dest`。命中判据只有「`dest` 非空」且在**下载
+    之前**就返回，所以 `dest` 只能在下完之后出现 —— 直接写 `dest` 的话，进程被杀留下的
+    半截文件会被永久当成完整缓存，命中了也播不动，再点多少次都不会重下（失败路径有
+    `give_up` 清理，被杀这条没有）。
+    序号让同一 URL 的并发预览各写各的文件：共用一个 `part` 时，后启动的那次会先删掉
+    前一次写到一半的文件，改名就可能把半截提拔成缓存。被杀留下的 `part` 命中判据看不见，
+    由 LRU 按 1GB 上限和「清空缓存」清理。 */
+    let seq = PREVIEW_SEQ.fetch_add(1, Ordering::Relaxed);
+    let part = dir.join(format!("{name}.{seq}.part"));
 
     let src = src.unwrap_or_else(|| "bilibili".into());
     // 参考来源不同，Referer/Origin 不同（B 站校验这个，漏了就 403）
@@ -1185,13 +1203,12 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
     /* 边收边写：一支 1080P 的 MV 几百 MB，**不能** `.bytes().await` 全收进内存。
     ⚠️ **实现不在这个文件里** —— 所有「URL → 盘上文件」都走 `crate::download`。
 
-    这个调用方需要的最小配置：单流、不续传（缓存文件名带内容哈希，半截文件
-    下次会命中缓存变成「下好了」）、不重试（直链过期换链接是上层的事）、
+    这个调用方需要的最小配置：单流、不续传、不重试（直链过期换链接是上层的事）、
     无进度（前台没显示条子）。 */
     let req = crate::download::Request {
         url: parsed.as_str(),
         label: "预览",
-        part: &dest,
+        part: &part,
         headers: &hdrs,
         shape: crate::download::Shape::Plain,
         client: crate::download::default_client(),
@@ -1208,12 +1225,28 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
         Err(e) => return Err(e),
     };
     if total == 0 {
-        /* ⚠️ 这一处**必须**自己删：空文件是 `Done { bytes: 0 }`（不是失败），
-        引擎按「下完了」正常返回。而缓存命中判据只是「文件非空」——
-        留个 0 字节的 .bin 会被当成命中，前端拿到一段播不动的视频，
-        而且**再点多少次都不会重下**。 */
-        let _ = tokio::fs::remove_file(&dest).await;
+        /* 空文件是 `Done { bytes: 0 }`（不是失败），引擎按「下完了」正常返回，
+        `give_up` 不会替我们删。改名只对非空文件做，所以这个 `part` 永远进不了
+        命中判据，但留着白占 LRU 额度。 */
+        let _ = tokio::fs::remove_file(&part).await;
         return Err("上游回了个空文件".into());
+    }
+
+    /* 改名才是「下好了」的那一刻：`dest` 只在整份下完之后出现，命中判据（非空）
+    才因此可信。目标已存在时改名可能被拒 —— 那只可能是另一次并发预览先落了盘，
+    它的那份同样完整，删掉自己手上这份、按命中返回。 */
+    if let Err(e) = tokio::fs::rename(&part, &dest).await {
+        let cached = tokio::fs::metadata(&dest).await.map(|m| m.len()).unwrap_or(0);
+        let _ = tokio::fs::remove_file(&part).await;
+        if cached == 0 {
+            return Err(format!("缓存改名失败：{e}"));
+        }
+        let _ = touch(&dest).await;
+        return Ok(json!({
+            "path": crate::platform::clean_path(&dest),
+            "bytes": cached,
+            "cached": true,
+        }));
     }
 
     // 放行给 asset 协议 —— 漏了这一步，前端 `<video>` 会静默 403
