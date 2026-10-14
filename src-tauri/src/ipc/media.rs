@@ -1162,6 +1162,10 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|e| format!("建缓存目录失败：{e}"))?;
+    // 放行给 asset 协议 —— 漏了这一步，前端 `<video>` 静默 403。scope 是进程内状态，
+    // 所以每条返回路径（含命中早退）都要走这一步：重启后第一次预览命中缓存时，
+    // 早退不放行就是 403
+    let _ = app.asset_protocol_scope().allow_directory(&dir, true);
     let name = format!("{}-{}", short_hash(&url), ext_hint(&parsed));
     let dest = dir.join(format!("{name}.bin"));
 
@@ -1248,9 +1252,6 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
             "cached": true,
         }));
     }
-
-    // 放行给 asset 协议 —— 漏了这一步，前端 `<video>` 会静默 403
-    let _ = app.asset_protocol_scope().allow_directory(&dir, true);
 
     // 顺手做一次 LRU 清理（不 await 结果：清不掉只是占点磁盘，不该让预览失败）
     let dir2 = dir.clone();
