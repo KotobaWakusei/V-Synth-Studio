@@ -112,11 +112,11 @@ fn allow_picked(app: &tauri::AppHandle, paths: &[PathBuf], recursive: bool) {
 pub async fn allow_path(app: tauri::AppHandle, path: String) -> Cmd {
     let p = PathBuf::from(&path);
     let target = if p.is_dir() {
+        /* 直接传入的目录原样放行 —— 是用户在对话框里自己挑的，含盘根 */
         p.clone()
     } else {
-        /* 只放行「目标文件所在的那一层」。`parent()` 对 `/x.txt` 回的是 `/`，
-           对空串回的是 `Some("")` —— 把它们放出去等于把整个盘（或一个空 scope）
-           递归放行，比不放行还糟，所以直接拒绝。 */
+        /* 文件只放行其所在的那一层：`parent()` 对 `/x.txt` 回 `/`、对空串回
+           `Some("")`，派生放行等于整盘（或空 scope）递归放行，直接拒绝。 */
         match p.parent().filter(|d| !d.as_os_str().is_empty() && d.parent().is_some()) {
             Some(d) => d.to_path_buf(),
             None => return Err(format!("只能放行具体文件或其所在目录：{path}")),
