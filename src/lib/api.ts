@@ -248,8 +248,18 @@ export const api = {
         })
         return {files: r.paths ?? []}
     },
-    /** 把**只有 `File` 对象、没有路径**的场合兜底成一条本机路径（落进临时目录）。 */
+    /**
+     * 把**只有 `File` 对象、没有路径**的场合兜底成一条本机路径（落进临时目录）。
+     *
+     * ⚠️ 2 GiB 上限必须在**读进内存之前**按 `size` 拦：`upload_dropped` 的 `LIMIT`
+     * 查的是收完的字节数（`src-tauri/src/ipc/fs.rs`），后端拒超限时最坏的那类文件
+     * 已经在内存里了。两处上限要一起改。
+     */
     fsUpload: async (file: File) => {
+        const LIMIT = 2 * 1024 * 1024 * 1024
+        if (file.size > LIMIT) {
+            throw new Error(`单个文件不能超过 ${LIMIT / (1024 * 1024 * 1024)} GiB`)
+        }
         const bytes = new Uint8Array(await file.arrayBuffer())
         return call<{ path: string; name: string; bytes: number }>('upload_dropped', {
             name: file.name,
