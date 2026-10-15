@@ -1242,6 +1242,8 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
         `give_up` 不会替我们删。改名只对非空文件做，所以这个 `part` 永远进不了
         命中判据，但留着白占 LRU 额度。 */
         let _ = tokio::fs::remove_file(&part).await;
+        /* 引擎给每个 part 配了一个 `.part.url` 续传记号，part 走不到改名就得连它一起清 */
+        let _ = tokio::fs::remove_file(crate::download::url_marker(&part)).await;
         return Err("上游回了个空文件".into());
     }
 
@@ -1251,6 +1253,7 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
     if let Err(e) = tokio::fs::rename(&part, &dest).await {
         let cached = tokio::fs::metadata(&dest).await.map(|m| m.len()).unwrap_or(0);
         let _ = tokio::fs::remove_file(&part).await;
+        let _ = tokio::fs::remove_file(crate::download::url_marker(&part)).await;
         if cached == 0 {
             return Err(format!("缓存改名失败：{e}"));
         }
@@ -1261,6 +1264,7 @@ pub async fn preview_fetch(app: tauri::AppHandle, url: String, src: Option<Strin
             "cached": true,
         }));
     }
+    let _ = tokio::fs::remove_file(crate::download::url_marker(&part)).await;
 
     // 顺手做一次 LRU 清理（不 await 结果：清不掉只是占点磁盘，不该让预览失败）
     let dir2 = dir.clone();
