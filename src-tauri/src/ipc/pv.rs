@@ -104,7 +104,9 @@ fn safe_file_name(raw: &str) -> String {
     }
 }
 
-/// 目标文件。`part > 0` 时沿用已存在的那个（追加），否则挑一个不重名的。
+/// 目标文件。`part > 0` 按**调用方传来的名字**去追加，而那个名字必须是 0 号块回给它的
+/// `name`（同名时 0 号块会把它改成 `xxx (1).mp4`）—— 传原名会把后面的块追加进用户早就
+/// 存在的同名文件，新导出的那份只剩 0 号块。`part == 0` 挑一个不重名的。
 fn target_file(dir: &Path, name: &str, part: u32) -> PathBuf {
     let first = dir.join(name);
     if part > 0 {
