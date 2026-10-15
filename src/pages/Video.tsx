@@ -134,6 +134,26 @@ interface QueueItem {
     dir: string
 }
 
+/** 一项下载的终态结论 —— `waitOutcome()` 的返回值 */
+interface Outcome {
+    files: string[]
+    dir: string
+    message: string
+    error?: string
+    canceled?: boolean
+}
+
+/**
+ * 队列与 uid 的**模块级副本**：`App` 只渲染当前页，切走就把本组件卸载了，而后端
+ * 的下载还在跑。放组件 state 里的话队列整个消失 —— 跑着的任务既看不到进度也点不了
+ * 重试，再切回来队列是空的，但那几个任务还在后端跑。
+ *
+ * `bump()` 是唯一的发布口，顺手把最新一份写回这里；切回来时 `runQueue()` 按 `jobId`
+ * 重新接上订阅（收订阅的是 `useJob` 的卸载清理，旧那条 promise 从此回不来）。
+ */
+let STORED_QUEUE: QueueItem[] = []
+let STORED_UID = 0
+
 /* ══════════════════════════════════════════════════════════════ 页面 ══ */
 
 export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
@@ -151,7 +171,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
     const [selection, setSelection] = useState<Set<string>>(() => new Set())
     const [picked, setPicked] = useState<Picked>({quality: null, audio: null, formatId: null})
 
-    const [queue, setQueue] = useState<QueueItem[]>([])
+    const [queue, setQueue] = useState<QueueItem[]>(STORED_QUEUE)
     const [detail, setDetail] = useState('')
     const etaRef = useRef<{ t: number; p: number } | null>(null)
 
@@ -478,11 +498,20 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
 
     /* ── 队列（一个 useJob 顺序驱动）─────────────────────────── */
 
-    const queueRef = useRef<QueueItem[]>([])
+    const queueRef = useRef<QueueItem[]>(STORED_QUEUE)
     const runningRef = useRef(false)
-    const uidRef = useRef(0)
+    const uidRef = useRef(STORED_UID)
 
-    const bump = () => setQueue([...queueRef.current])
+    const bump = () => {
+        STORED_QUEUE = queueRef.current
+        setQueue([...queueRef.current])
+    }
+
+    const nextUid = () => {
+        uidRef.current += 1
+        STORED_UID = uidRef.current
+        return uidRef.current
+    }
 
     const patch = (uid: number, p: Partial<QueueItem>) => {
         const it = queueRef.current.find((q) => q.uid === uid)
@@ -491,31 +520,11 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
         bump()
     }
 
-    const runItem = async (item: QueueItem) => {
-        patch(item.uid, {status: 'running', message: '正在创建下载任务…', error: undefined})
-        let jobId = ''
-        try {
-            const r = await api.downloadVideo(item.payload)
-            jobId = r.jobId
-            if (!jobId) throw new Error('任务没能启动，请重试')
-        } catch (e) {
-            const msg = errText(e)
-            patch(item.uid, {status: 'error', error: msg, message: msg})
-            onToast(`「${item.label}」下载失败：${msg}`, 'err')
-            return
-        }
-        patch(item.uid, {jobId})
-
-        /* 等这一项跑到终态 —— 终态只有一次，所以只会 resolve 一次。
-           ⚠️ 切走视图时 useJob 会收订阅，这个 promise 就永远悬着：循环跟着停，
-           不会再有 state 更新（靠组件卸载收场）。 */
-        const outcome = await new Promise<{
-            files: string[]
-            dir: string
-            message: string
-            error?: string
-            canceled?: boolean
-        }>((resolve) => {
+    /* 挂上这个 jobId 的订阅，等它到终态 —— 终态只有一次，所以只会 resolve 一次。
+       ⚠️ 切走视图时 `useJob` 会收订阅，这条 promise 就永远悬着，调用它的那个
+       `runItem` 再也回不来（见 `runQueue` 开头的续跑）。 */
+    const waitOutcome = (jobId: string) =>
+        new Promise<Outcome>((resolve) => {
             start(jobId, {
                 onDone: (j) => {
                     const r = (j.result ?? {}) as { files?: string[]; dir?: string }
@@ -526,6 +535,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             })
         })
 
+    const settle = (item: QueueItem, outcome: Outcome) => {
         if (outcome.canceled) {
             patch(item.uid, {status: 'canceled', message: '已取消'})
             onToast(`「${item.label}」已取消`, 'warn')
@@ -543,11 +553,32 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
         }
     }
 
+    const runItem = async (item: QueueItem) => {
+        patch(item.uid, {status: 'running', message: '正在创建下载任务…', error: undefined})
+        let jobId = ''
+        try {
+            const r = await api.downloadVideo(item.payload)
+            jobId = r.jobId
+            if (!jobId) throw new Error('任务没能启动，请重试')
+        } catch (e) {
+            const msg = errText(e)
+            patch(item.uid, {status: 'error', error: msg, message: msg})
+            onToast(`「${item.label}」下载失败：${msg}`, 'err')
+            return
+        }
+        patch(item.uid, {jobId})
+        settle(item, await waitOutcome(jobId))
+    }
+
     const runQueue = async () => {
         if (runningRef.current) return
         runningRef.current = true
         try {
-            for (; ;) {
+            /* 上一次跑队列时被切走了：那条 promise 悬在收掉的订阅上回不来，这一项
+               就一直挂着 `running`。按 jobId 重新接上，否则它永远卡在这儿。 */
+            const stuck = queueRef.current.find((q) => q.status === 'running' && q.jobId)
+            if (stuck?.jobId) settle(stuck, await waitOutcome(stuck.jobId))
+            for (;;) {
                 const next = queueRef.current.find((q) => q.status === 'queued')
                 if (!next) break
                 await runItem(next)
@@ -556,6 +587,13 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             runningRef.current = false
         }
     }
+
+    /* 队列是模块级的，切回来要主动把它接上：没有这一下，上一批没跑完的项会永远
+       停在 `running`，而排在它后面的也再没人去取。 */
+    useEffect(() => {
+        void runQueue()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
 
     const enqueue = (entries: { key: string; label: string; url: string }[], runNow: boolean) => {
         if (!parsed) {
@@ -572,7 +610,7 @@ export function Video({state, onNavigate, onRefreshState, onToast}: PageProps) {
             if (queueRef.current.some((q) => q.key === e.key && (q.status === 'queued' || q.status === 'running'))) continue
             if (fresh.some((f) => f.key === e.key)) continue
             fresh.push({
-                uid: ++uidRef.current,
+                uid: nextUid(),
                 key: e.key,
                 label: e.label,
                 url: e.url,

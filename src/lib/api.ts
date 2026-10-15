@@ -108,6 +108,11 @@ export const api = {
      */
     svsepDeleteDeps: () => call<{ started: boolean }>('svsep_deps_delete'),
     /**
+     * 取消正在跑的删除。已经删掉的文件不复原，只是不再往下删 —— 后端收手要等
+     * 当前这一批 walk 完，所以界面照旧显示进度、等 `download.delete.active` 变 false。
+     */
+    svsepStopDeleteDeps: () => call<{ stopping: boolean }>('svsep_deps_delete_stop'),
+    /**
      * 提交一次分离。
      *
      * ⚠️ **收的是本机路径，不是文件字节。** Python 服务要的本来就是**一个文件**，

@@ -214,6 +214,10 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
     const [fieldErr, setFieldErr] = useState('')
     /** 进度条的标题：多段导出时带上「第 n / m 段」 */
     const [jobLabel, setJobLabel] = useState('处理进度')
+    /** 连点「开始处理」会提交两个任务，第二个把第一个顶掉。这个标志从按下起保持到
+        后端第一帧任务快照到达 —— `start()` 会先把 `job` 清成 null，光看 `job?.status`
+        挡不住这段空窗，多段导出的段间空档同理。 */
+    const [submitting, setSubmitting] = useState(false)
 
     /**
      * 裁剪的分段**放在页面这一层**，不放波形编辑器内部：切到别的操作再切回来时，
@@ -230,6 +234,12 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
     const probeCache = useRef(new Map<string, ProbeInfo | { error: string }>())
 
     const {job, start} = useJob()
+
+    /* 提交成功后 `start()` 把 `job` 清成 null，第一帧快照到达前 `job?.status` 什么都不是；
+       快照带着任一状态就说明守卫可以交回给 `job?.status` 了。 */
+    useEffect(() => {
+        if (job?.status) setSubmitting(false)
+    }, [job?.status])
 
     const patch = (p: Partial<Settings>) => setSettings((s) => ({...s, ...p}))
 
@@ -452,6 +462,8 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                 return
             }
         }
+        if (submitting) return
+        setSubmitting(true)
         setFieldErr('')
         setResult(null)
         setRunErr('')
@@ -498,6 +510,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
             const msg = errText(e)
             setRunErr(msg)
             onToast(`提交任务失败：${msg}`, 'err')
+            setSubmitting(false)
         }
     }
 
@@ -552,7 +565,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
     /* ── 派生数据 ───────────────────────────────────────────── */
 
     const formatEntries = Object.entries(formats)
-    const running = job?.status === 'running'
+    const busy = submitting || job?.status === 'running'
 
     /* ── 渲染 ───────────────────────────────────────────────── */
 
@@ -929,7 +942,7 @@ export function Audio({state, onNavigate, onToast}: PageProps) {
                 <Panel>
                     <div className="audio-run">
                         <div className="btn-row">
-                            <Button variant="primary" size="lg" icon="zap" loading={running} onClick={run}>
+                            <Button variant="primary" size="lg" icon="zap" loading={busy} onClick={run}>
                                 开始处理
                             </Button>
                             <Button

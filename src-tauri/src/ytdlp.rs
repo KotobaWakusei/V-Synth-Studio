@@ -471,7 +471,18 @@ pub async fn download(
         return Err(CANCELED.to_string());
     }
 
-    let status = child.wait().await.map_err(|e| e.to_string())?;
+    /* 上面那个循环是被 stdout 的 EOF 打断的 —— 正常情况下进程这时已经退了，`wait`
+       立刻返回。卡住只可能是异常（关了输出却不退），而 `wait()` 没有超时的话这条
+       任务会永远停在 running，界面上既没有进度也没有失败。 */
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(120), child.wait())
+        .await
+    {
+        Ok(r) => r.map_err(|e| e.to_string())?,
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err("yt-dlp 输出已结束但进程迟迟不退出，已强制结束".into());
+        }
+    };
     let stderr = stderr_task.await.unwrap_or_default();
     if status.code().unwrap_or(-1) == 0 {
         Ok(files)

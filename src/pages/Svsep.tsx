@@ -77,6 +77,9 @@ const ESTIMATE_NOTE = '装了 NVIDIA 显卡会快很多'
 /** 后端探测的间隔：它要查注册表探 GPU，比状态那条贵，所以单独一个更慢的节奏 */
 const POLL_BACKEND = 8000
 
+/** 任务进度轮询连错这么多次就当这条路走不通：再问下去只会每 2 秒刷一条错误 toast */
+const POLL_GIVE_UP = 5
+
 /**
  * 推理方式 —— 原版软件标题栏上就有这个三选一（`自动 / GPU / CPU`），
  * 能不能真用上 GPU 由 Python 那边探（本机是 AMD 卡，只会回退 CPU）。
@@ -376,6 +379,7 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
     useEffect(() => {
         if (!taskId || settled) return
         let alive = true
+        let fails = 0
         const t = setInterval(async () => {
             try {
                 const v = await api.svsepTask(taskId)
@@ -388,8 +392,13 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                 } else if (v.status === 'error' || v.status === 'failed') {
                     onToast(v.error || v.message || '分离失败', 'err')
                 }
+                fails = 0
             } catch (e) {
-                if (alive) onToast(errText(e), 'err')
+                /* 轮询自己失败不算任务失败：接着问。问到次数上限才报一次并收手 */
+                if (!alive || ++fails < POLL_GIVE_UP) return
+                alive = false
+                clearInterval(t)
+                onToast(`读不到分离进度：${errText(e)}`, 'err')
             }
         }, POLL_STATUS)
         return () => {
@@ -452,6 +461,14 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
 
     /* ── 动作 ───────────────────────────────────────────── */
 
+    /* 打开输出目录。状态还没回来时 `outputsDir` 是空串 —— 直接丢给后端只会得到
+       「缺少 path」的 Err，被 `void` 吞掉之后界面上没有任何反应。所以这里既不发
+       空请求，也把失败弹出来（目录被删掉 / 被占用都要让用户知道）。 */
+    const openOutputs = () => {
+        if (!outputsDir) return
+        void api.fsOpen({path: outputsDir}).catch((e) => onToast(errText(e), 'err'))
+    }
+
     /* 暂停：`.part` 留着，下次点下载会带 Range 接着下。
        ⚠️ 后端是在**下一块数据到达时**才收手，所以按钮按下去到进度条停住之间
        还有一两秒 —— toast 说的是「正在暂停」，不是「已暂停」。 */
@@ -502,6 +519,18 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
         try {
             await api.svsepDeleteDeps()
             onToast('开始删除依赖文件，删完要重新下载才能用离线分离', 'warn')
+            void refresh()
+        } catch (e) {
+            onToast(errText(e), 'err')
+        }
+    }
+
+    /* 取消删除：已经删掉的不会回来，只是不再往下删。后端收手要等当前这一批走完，
+       所以进度条照旧转，直到 `dl.delete.active` 自己变 false。 */
+    const doStopDeleteDeps = async () => {
+        try {
+            await api.svsepStopDeleteDeps()
+            onToast('正在取消删除…已删掉的文件不会恢复', 'info')
             void refresh()
         } catch (e) {
             onToast(errText(e), 'err')
@@ -798,6 +827,11 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                                 <span className="dim">{dl.delete.files} 个 / {formatBytes(dl.delete.bytes)}</span>
                             </div>
                             <ProgressBar pct={null}/>
+                            <div className="btn-row">
+                                <Button variant="ghost" icon="x" onClick={() => void doStopDeleteDeps()}>
+                                    停止删除
+                                </Button>
+                            </div>
                         </div>
                     )}
 
@@ -851,7 +885,8 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                             <Button
                                 variant="ghost"
                                 icon="folder"
-                                onClick={() => void api.fsOpen({path: st?.outputsDir})}
+                                disabled={!outputsDir}
+                                onClick={openOutputs}
                             >
                                 输出目录
                             </Button>
@@ -958,7 +993,8 @@ export function Svsep({onNavigate, onToast, state}: PageProps) {
                                         <Button
                                             size="sm"
                                             icon="folder"
-                                            onClick={() => void api.fsOpen({path: st?.outputsDir})}
+                                            disabled={!outputsDir}
+                                            onClick={openOutputs}
                                         >
                                             打开输出目录
                                         </Button>
