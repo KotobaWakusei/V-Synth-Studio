@@ -52,21 +52,25 @@ pub async fn pv_save_chunk(
     let name = safe_file_name(&name);
     let path = target_file(&dir_path, &name, part);
 
-    // 0 号块新建（同名已经改成不重名的那个），之后的块追加
+    // 0 号块新建（同名已经改成不重名的那个），之后的块追加。
+    // 异步写：保存目录是用户随便选的，慢盘上一个 16MB 块能同步写掉几秒，
+    // 那期间 Tokio 上所有 IPC 命令一起停住
     {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(part > 0)
             .write(true)
             .truncate(part == 0)
             .open(&path)
+            .await
             .map_err(|e| format!("写入失败：{e}"))?;
         file.write_all(&bytes)
+            .await
             .map_err(|e| format!("写入失败：{e}"))?;
     }
 
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
     Ok(json!({
         "path": crate::platform::clean_path(&path),
         "name": path
