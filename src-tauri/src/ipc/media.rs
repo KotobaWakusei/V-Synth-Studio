@@ -86,13 +86,14 @@ fn set_progress(
                 if !extra.is_null() {
                     if let Some(prog) = m.get_mut("progress").and_then(|v| v.as_object_mut()) {
                         if let Some(src) = extra.as_object() {
-                            /* 合并阶段传的是空对象，而并入是只进不出的：不先清，下载
-                               阶段最后那个速度/剩余就会一直挂在合并那几分钟上。 */
-                            for k in ["speedText", "etaText", "eta"] {
-                                prog.remove(k);
-                            }
+                            // null 值 = 删该字段。下载阶段的回调用 `{}` 表示「无附加字段」，
+                            // 不能在每次更新时顺带清速率 —— 那会抹掉另一路并发回调刚写的值
                             for (k, v) in src {
-                                prog.insert(k.clone(), v.clone());
+                                if v.is_null() {
+                                    prog.remove(k);
+                                } else {
+                                    prog.insert(k.clone(), v.clone());
+                                }
                             }
                         }
                     }
@@ -592,7 +593,15 @@ async fn download_bilibili(
         let ffmpeg = crate::audio::find_ffmpeg(&st.root);
         let mp4_dest = joined(target_dir, &format!("{safe}.mp4"));
         if ffmpeg.is_some() {
-            set_progress(st, job, Some(92.0), Some("合并音视频…"), json!({}));
+            /* 下载阶段最后那个速率/剩余还挂在 progress 上，不清就会一直显示在
+               合并这几分钟里；显式传 null 走上面的删除分支。 */
+            set_progress(
+                st,
+                job,
+                Some(92.0),
+                Some("合并音视频…"),
+                json!({"speedText": null, "etaText": null, "eta": null}),
+            );
             let merge = crate::audio::run_ffmpeg(
                 &st.root,
                 &[
